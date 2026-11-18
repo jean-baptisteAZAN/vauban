@@ -1,0 +1,138 @@
+// Package engine plans and applies vauban modules as ordered, resumable steps.
+package engine
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/jean-baptisteAZAN/vauban/internal/config"
+	"github.com/jean-baptisteAZAN/vauban/internal/detect"
+)
+
+// Outputs are non-secret key/value results passed from one step to the next.
+type Outputs map[string]string
+
+// Status reports how much of a module is already present in a repository.
+type Status int
+
+const (
+	StatusPresent Status = iota
+	StatusMissing
+	StatusPartial
+)
+
+// Module is one area of setup (container, ci, infra, deploy...).
+type Module interface {
+	ID() string
+	Title() string // human label for doctor
+	Detect(p *detect.Project) Status
+	Requires() []string // module IDs that must run first
+	Plan(p *detect.Project, c *config.Config) ([]Step, error)
+}
+
+// Step is one idempotent unit of work shown in plan output and run by apply.
+type Step interface {
+	ID() string       // stable, unique: "<module>:<thing>"
+	Describe() string // one line for plan output
+	Apply(ctx context.Context, env *Env) (Outputs, error)
+}
+
+// Env is what a step needs to apply itself.
+type Env struct {
+	Root  string
+	Force bool
+	Run   Runner
+	In    Outputs // accumulated non-secret outputs of previous steps
+	Log   io.Writer
+}
+
+func (e *Env) logf(format string, args ...any) {
+	if e.Log != nil {
+		fmt.Fprintf(e.Log, format, args...)
+	}
+}
+
+// Order sorts modules so every module comes after its requirements. Among
+// modules whose requirements are satisfied, input order is preserved.
+func Order(mods []Module) ([]Module, error) {
+	byID := make(map[string]bool, len(mods))
+	for _, m := range mods {
+		byID[m.ID()] = true
+	}
+	for _, m := range mods {
+		for _, r := range m.Requires() {
+			if !byID[r] {
+				return nil, fmt.Errorf("module %s requires unknown module %s", m.ID(), r)
+			}
+		}
+	}
+	done := make(map[string]bool, len(mods))
+	out := make([]Module, 0, len(mods))
+	for len(out) < len(mods) {
+		progressed := false
+		for _, m := range mods {
+			if done[m.ID()] || !allDone(m.Requires(), done) {
+				continue
+			}
+			done[m.ID()] = true
+			out = append(out, m)
+			progressed = true
+			break
+		}
+		if !progressed {
+			var stuck []string
+			for _, m := range mods {
+				if !done[m.ID()] {
+					stuck = append(stuck, m.ID())
+				}
+			}
+			return nil, fmt.Errorf("module dependency cycle among: %s", strings.Join(stuck, ", "))
+		}
+	}
+	return out, nil
+}
+
+func allDone(ids []string, done map[string]bool) bool {
+	for _, id := range ids {
+		if !done[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// Execute applies steps in order, skipping those already done in st and
+// saving st after every step so an interrupted run resumes where it stopped.
+func Execute(ctx context.Context, steps []Step, st *State, env *Env) error {
+	st.init()
+	if env.In == nil {
+		env.In = Outputs{}
+	}
+	for k, v := range st.Outputs {
+		env.In[k] = v
+	}
+	for _, s := range steps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		id := s.ID()
+		if st.Done[id] {
+			continue
+		}
+		out, err := s.Apply(ctx, env)
+		if err != nil {
+			return fmt.Errorf("%s: %w", id, err)
+		}
+		for k, v := range out {
+			st.Outputs[k] = v
+			env.In[k] = v
+		}
+		st.Done[id] = true
+		if err := st.Save(env.Root); err != nil {
+			return fmt.Errorf("%s: save state: %w", id, err)
+		}
+	}
+	return nil
+}
