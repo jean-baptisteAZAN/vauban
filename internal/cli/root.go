@@ -15,6 +15,8 @@ func NewRoot(version string) *cobra.Command {
 		Short:         "Detect your repo and set up CI, containers, OpenTofu infra and deploy",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE:          runDoctor,
 	}
 	pf := root.PersistentFlags()
 	pf.String("dir", ".", "project directory")

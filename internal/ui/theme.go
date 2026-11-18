@@ -25,7 +25,7 @@ func Styled() bool {
 }
 
 // Mark renders a status as a symbol, or plain text when output is unstyled.
-// Status is one of "ok", "missing", "partial".
+// Status is one of "ok", "missing", "partial"; unknown statuses render as "[status]".
 func Mark(status string) string {
 	if !Styled() {
 		return "[" + status + "]"
@@ -38,5 +38,5 @@ func Mark(status string) string {
 	case "partial":
 		return Warn.Render("◐")
 	}
-	return status
+	return "[" + status + "]"
 }
