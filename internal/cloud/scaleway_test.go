@@ -413,12 +413,17 @@ func scwQuotas(t *testing.T, quotaStatus int) func(*http.ServeMux) {
 			}
 			if quotaStatus != http.StatusOK {
 				w.WriteHeader(quotaStatus)
-				_, _ = w.Write([]byte(`{"type":"permissions_denied","message":"insufficient permissions","details":[{"resource":"quota","action":"read"}]}`))
+				if quotaStatus == http.StatusForbidden {
+					_, _ = w.Write([]byte(`{"type":"permissions_denied","message":"insufficient permissions","details":[{"resource":"quota","action":"read"}]}`))
+				} else {
+					_, _ = w.Write([]byte(`{"message":"internal error"}`))
+				}
 				return
 			}
 			if r.URL.Query().Get("page") == "2" {
 				_, _ = w.Write([]byte(`{"total_count":5,"quota":[
-					{"name":"cp_servers_type_PRO2_XXS","limits":[{"zone":"fr-par-1","unlimited":true}]},
+					{"name":"cp_servers_type_PRO2_XXS","limits":[{"global":true,"limit":0},{"zone":"fr-par-1","unlimited":true}]},
+					{"name":"cp_servers_type_GP1_XS","limits":[{"global":true,"limit":0},{"zone":"nl-ams-1","limit":5}]},
 					{"name":"cp_servers_type_STARDUST1_S","limits":[{"zone":"fr-par-1","limit":0},{"zone":"nl-ams-1","limit":1}]}
 				]}`))
 				return
@@ -484,10 +489,11 @@ func TestScalewayQuota(t *testing.T) {
 	}{
 		{"STARDUST1-S", false, "scaleway: quota for STARDUST1-S in fr-par-1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"},
 		{"PLAY2-PICO", false, "scaleway: quota for PLAY2-PICO in fr-par-1 is 1 and 1 in use — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"},
-		{"PRO2-XXS", true, ""},
-		{"GP1-XS", true, ""},
+		{"PRO2-XXS", true, ""}, // zone unlimited wins over global 0
+		{"GP1-XS", false, "scaleway: quota for GP1-XS in fr-par-1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"}, // global, no zone entry
+		{"DEV1-S", true, ""}, // no quota listed
 	} {
-		got, err := s.Quota(context.Background(), "fr-par-1", tc.size)
+		got, err := s.Quota(context.Background(), "fr-par-1", tc.size, false)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.size, err)
 		}
@@ -501,11 +507,19 @@ func TestScalewayQuota(t *testing.T) {
 }
 
 func TestScalewayQuotaUnreadable(t *testing.T) {
-	got, err := fakeSCWAPI(t, scwQuotas(t, http.StatusForbidden)).Quota(context.Background(), "fr-par-1", "STARDUST1-S")
+	got, err := fakeSCWAPI(t, scwQuotas(t, http.StatusForbidden)).Quota(context.Background(), "fr-par-1", "STARDUST1-S", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !got.OK || !strings.HasPrefix(got.Reason, "not checked") {
 		t.Errorf("Quota = %+v", got)
+	}
+}
+
+// A server error is returned as an error, for the caller to warn about.
+func TestScalewayQuotaServerError(t *testing.T) {
+	s := fakeSCWAPI(t, scwQuotas(t, http.StatusInternalServerError))
+	if _, err := s.Quota(context.Background(), "fr-par-1", "STARDUST1-S", false); err == nil {
+		t.Fatal("want error on 500")
 	}
 }

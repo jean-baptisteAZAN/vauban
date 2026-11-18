@@ -73,8 +73,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	// Saved before the plan builds, so answers survive a failing plan.
-	if err := c.Save(root); err != nil {
+	if err := saveConfig(root, c); err != nil {
 		return err
 	}
 	pl, err := preparePlan(root, c, force)
@@ -90,11 +89,40 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "DNS: point "+c.Domain+" to the server IP (shown after apply)")
 	}
-	if err := engine.Preflight(pl.p, c, pl.mods, pl.newServer(c)); err != nil {
-		ui.Warnings(w, "before apply:", strings.Split(err.Error(), "\n"))
+	notices, err := engine.Preflight(pl.p, c, pl.mods, pl.preflightOptions(root, c))
+	var lines []string
+	if err != nil {
+		lines = strings.Split(err.Error(), "\n")
 	}
+	ui.Warnings(w, "before apply:", append(lines, notices.Warnings...))
+	writeNotes(w, notices.Notes)
 	ui.PlanFooter(w)
 	return nil
+}
+
+// saveConfig saves c as soon as it is resolved, before the plan builds, so
+// answers survive a failing plan, but only once infra accepts the cloud: a
+// refused cloud change must never reach vauban.yaml (destroy reads it).
+func saveConfig(root string, c *config.Config) error {
+	st, err := engine.LoadState(root)
+	if err != nil {
+		return err
+	}
+	if err := infra.CheckCloud(root, st, c); err != nil {
+		return err
+	}
+	return c.Save(root)
+}
+
+// writeNotes prints preflight notes (e.g. a quota the cloud cannot report).
+func writeNotes(w io.Writer, notes []string) {
+	if len(notes) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	for _, n := range notes {
+		fmt.Fprintln(w, ui.Hint("note: "+n))
+	}
 }
 
 // resolveConfig returns vauban.yaml, or builds it from flags or prompts. It
@@ -286,11 +314,28 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 	return pl, nil
 }
 
-// newServer reports whether apply may create a server, so the cloud quota
-// matters: infra:apply is to run and the applied infra (if any) has another
-// cloud/region/size.
-func (pl *planned) newServer(c *config.Config) bool {
-	return !pl.st.Done["infra:apply"] && pl.st.Outputs["infra_fingerprint"] != infraFingerprint(c)
+// preflightOptions says how preflight treats the cloud quota. It is skipped
+// unless apply may create a server (infra:apply is to run and the applied
+// infra, if any, has another cloud/region/size). It only warns when an
+// interrupted apply may have left resources (a rendered fingerprint or a
+// non-empty tfstate): tofu and the quota hint on its error are the backstop.
+func (pl *planned) preflightOptions(root string, c *config.Config) engine.PreflightOptions {
+	applied := pl.st.Outputs["infra_fingerprint"]
+	opts := engine.PreflightOptions{Replacing: applied != ""}
+	switch {
+	case pl.st.Done["infra:apply"] || applied == infraFingerprint(c):
+		opts.Quota = engine.QuotaSkip
+	case pl.st.Outputs["rendered_fingerprint"] != "" || nonEmpty(filepath.Join(root, "infra", "terraform.tfstate")):
+		opts.Quota = engine.QuotaWarn
+	default:
+		opts.Quota = engine.QuotaBlock
+	}
+	return opts
+}
+
+func nonEmpty(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Size() > 0
 }
 
 func (pl *planned) steps() []engine.Step {

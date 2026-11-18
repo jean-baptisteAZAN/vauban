@@ -38,9 +38,11 @@ type Provider interface {
 	// per-type quotas leave out the sizes the account cannot create.
 	Sizes(ctx context.Context, region string) ([]Option, error)
 	// Quota reports whether the account may create one more server of size
-	// in region. Quotas that cannot be read are OK with a "not checked"
-	// reason; errors are for failed API calls.
-	Quota(ctx context.Context, region, size string) (QuotaStatus, error)
+	// in region. replacing means a server is already applied, so the change
+	// resizes or replaces it rather than adding one. Quotas that cannot be
+	// read are OK with a "not checked: …" reason; errors are for failed API
+	// calls.
+	Quota(ctx context.Context, region, size string, replacing bool) (QuotaStatus, error)
 	// Terraform renders the provider block, ssh key(s), server and firewall,
 	// with outputs server_ip and server_ipv6.
 	Terraform(in TFInput) ([]byte, error)

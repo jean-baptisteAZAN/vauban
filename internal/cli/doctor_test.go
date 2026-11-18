@@ -28,7 +28,7 @@ func doctorOutArgs(t *testing.T, args ...string) string {
 
 func TestDoctorEmpty(t *testing.T) {
 	got := doctorOut(t, "../../testdata/empty")
-	for _, want := range []string{"vauban · ", "stack     unknown", "github    none", "next      gh repo create empty --private --source . --push"} {
+	for _, want := range []string{"vauban · ", "stack     unknown", "github    none", "next      commit first (git init && git add -A && git commit -m \"init\"), then gh repo create empty --private --source . --push"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}

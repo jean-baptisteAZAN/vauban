@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -69,6 +70,8 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	managed := infra.IsManaged(root)
+	// The cloud the infra was applied on, which vauban.yaml may no longer name.
+	cloudID := cmp.Or(infra.AppliedCloud(root, st), c.Cloud)
 	tofu, _ := tools.Tofu()
 	tofuArgs := []string{"-chdir=infra", "destroy", "-auto-approve", "-input=false"}
 	// A fresh checkout has no providers installed: init before destroying.
@@ -82,7 +85,7 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	run := sig.runner(cmdRunner)
 
 	w := cmd.OutOrStdout()
-	creds, problems := destroyPreflight(ctx, root, c, p.GitHubRepo, managed)
+	creds, problems := destroyPreflight(ctx, root, cloudID, p.GitHubRepo, managed)
 	if len(problems) > 0 {
 		ui.Warnings(w, "cannot destroy:", problems)
 		return &ExitError{Code: 1, Err: errors.New("preflight failed — nothing was destroyed")}
@@ -94,7 +97,7 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 		if initArgs != nil {
 			fmt.Fprintf(w, "  - $ %s %s\n", tofu, strings.Join(initArgs, " "))
 		}
-		fmt.Fprintf(w, "  - $ %s %s  (deletes the %s server and firewall)\n", tofu, strings.Join(tofuArgs, " "), c.Cloud)
+		fmt.Fprintf(w, "  - $ %s %s  (deletes the %s server and firewall)\n", tofu, strings.Join(tofuArgs, " "), cloudID)
 	} else {
 		fmt.Fprintln(w, "  - no vauban-managed infra/main.tf: no cloud resources to destroy")
 	}
@@ -207,8 +210,8 @@ func secretNotFound(err error) bool {
 // destroyPreflight checks, before confirmation, what destroy needs: gh on
 // PATH, authenticated and able to access the repo (when there are secrets to
 // delete), and for managed
-// infra tofu and the cloud credentials, which it returns.
-func destroyPreflight(ctx context.Context, root string, c *config.Config, repo string, managed bool) (creds, problems []string) {
+// infra tofu and the credentials of cloudID, which it returns.
+func destroyPreflight(ctx context.Context, root, cloudID, repo string, managed bool) (creds, problems []string) {
 	if repo != "" {
 		if _, err := exec.LookPath("gh"); err != nil {
 			problems = append(problems, "gh not found (install https://cli.github.com, then run gh auth login)")
@@ -225,7 +228,7 @@ func destroyPreflight(ctx context.Context, root string, c *config.Config, repo s
 		if _, ok := tools.Tofu(); !ok {
 			problems = append(problems, "OpenTofu (tofu) not found (install: https://opentofu.org/docs/intro/install/)")
 		}
-		prov, err := cloud.Get(c.Cloud)
+		prov, err := cloud.Get(cloudID)
 		if err == nil {
 			creds, err = prov.CredentialsEnv()
 		}

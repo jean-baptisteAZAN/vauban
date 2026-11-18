@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jean-baptisteAZAN/vauban/internal/cloud"
 	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
@@ -266,5 +267,49 @@ func TestDestroyInitsWhenTerraformDirMissing(t *testing.T) {
 	}
 	if strings.Contains(out, planToken) {
 		t.Errorf("token in output:\n%s", out)
+	}
+}
+
+// destroy uses the cloud the infra was applied on, even if vauban.yaml now
+// names another one.
+func TestDestroyUsesAppliedCloud(t *testing.T) {
+	root, fr := destroyEnv(t)
+	t.Cleanup(cloud.Register(&doProvider{}))
+	writeFile(t, root, config.FileName, "project: shop\ncloud: digitalocean\nregion: fra1\nsize: s-1vcpu-1gb\napp_port: 8080\n")
+	st, _ := engine.LoadState(root)
+	st.Outputs["infra_fingerprint"] = "hetzner/nbg1/cx23"
+	saveState(t, root, st)
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: digitalocean/fra1/s-1vcpu-1gb\n") // state wins
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	if err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	if !slices.Contains(fr.Calls[0].Env, "HCLOUD_TOKEN="+planToken) || !strings.Contains(out, "deletes the hetzner server") {
+		t.Errorf("destroy env %q, output:\n%s", fr.Calls[0].Env, out)
+	}
+}
+
+// Without an applied fingerprint, the main.tf fingerprint names the cloud,
+// and without either, vauban.yaml does.
+func TestDestroyCloudFallbacks(t *testing.T) {
+	root, fr := destroyEnv(t) // main.tf: hetzner, no infra_fingerprint
+	t.Cleanup(cloud.Register(&doProvider{}))
+	writeFile(t, root, config.FileName, "project: shop\ncloud: digitalocean\nregion: fra1\nsize: s-1vcpu-1gb\napp_port: 8080\n")
+	if out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop"); err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	if !slices.Contains(fr.Calls[0].Env, "HCLOUD_TOKEN="+planToken) {
+		t.Errorf("main.tf cloud not used: %q", fr.Calls[0].Env)
+	}
+
+	root, fr = destroyEnv(t)
+	t.Cleanup(cloud.Register(&doProvider{}))
+	writeFile(t, root, config.FileName, "project: shop\ncloud: digitalocean\nregion: fra1\nsize: s-1vcpu-1gb\napp_port: 8080\n")
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n")
+	if out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop"); err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	if !slices.Contains(fr.Calls[0].Env, "DIGITALOCEAN_TOKEN="+doToken) {
+		t.Errorf("vauban.yaml cloud not used: %q", fr.Calls[0].Env)
 	}
 }

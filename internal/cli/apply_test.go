@@ -203,14 +203,33 @@ func TestApplyNonTTYWithoutYesBeforeRemoteCheck(t *testing.T) {
 
 func TestApplySavesConfigBeforePlanFails(t *testing.T) {
 	root, _ := applyEnv(t)
+	for _, f := range []string{"go.mod", "main.go"} {
+		_ = os.Remove(filepath.Join(root, f))
+	}
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner", "--port", "9000")
+	if err == nil || !strings.Contains(err.Error(), "unsupported stack") {
+		t.Fatalf("want module plan error, got %v\n%s", err, out)
+	}
+	if c, err := config.Load(root); err != nil || c.AppPort != 9000 {
+		t.Errorf("vauban.yaml not saved before the plan: %+v %v", c, err)
+	}
+}
+
+func TestApplyRefusedCloudChangeNotSaved(t *testing.T) {
+	root, fr := applyEnv(t)
 	t.Cleanup(cloud.Register(&doProvider{}))
+	const existing = "project: shop\ncloud: hetzner\nregion: nbg1\nsize: cx23\napp_port: 8080\n"
+	writeFile(t, root, config.FileName, existing)
 	saveState(t, root, staleState())
 	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "digitalocean")
 	if err == nil || !strings.Contains(err.Error(), "changing cloud") {
 		t.Fatalf("want cloud change error, got %v\n%s", err, out)
 	}
-	if c, err := config.Load(root); err != nil || c.Cloud != "digitalocean" {
-		t.Errorf("vauban.yaml not saved before the plan: %+v %v", c, err)
+	if b, _ := os.ReadFile(filepath.Join(root, config.FileName)); string(b) != existing {
+		t.Errorf("vauban.yaml changed:\n%s", b)
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
 	}
 }
 
@@ -566,5 +585,60 @@ func TestApplyTofuQuotaErrorHint(t *testing.T) {
 	fr.Errors = map[string]error{tofuApplyCmd: errors.New("tofu: exit status 1: Error: network unreachable")}
 	if _, err = execVauban(t, context.Background(), "apply", "--dir", root, "--yes"); err == nil || strings.Contains(err.Error(), "looks exhausted") {
 		t.Errorf("hint on a non-quota error: %v", err)
+	}
+}
+
+// The hint is for a refused server (infra:apply), not another step.
+func TestApplyQuotaHintOnlyOnInfraApply(t *testing.T) {
+	root, fr := applyEnv(t)
+	fr.Errors = map[string]error{"tofu -chdir=infra init -input=false": errors.New("tofu: exit status 1: Error: quota exceeded downloading providers")}
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err == nil || !strings.HasPrefix(err.Error(), "infra:init:") || strings.Contains(err.Error(), "looks exhausted") {
+		t.Errorf("err = %v\n%s", err, out)
+	}
+}
+
+// A quota API error warns and never blocks apply.
+func TestApplyQuotaErrorDoesNotBlock(t *testing.T) {
+	root, _ := applyEnv(t)
+	prov := &planProvider{quotaErr: errors.New("hetzner: quota API: 500")}
+	t.Cleanup(cloud.Register(prov))
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warnings:\n  - quota not checked: hetzner: quota API: 500") {
+		t.Errorf("missing warning in:\n%s", out)
+	}
+}
+
+// Resuming an interrupted first apply: resources may exist, so an exhausted
+// quota only warns.
+func TestApplyResumeQuotaWarns(t *testing.T) {
+	for name, prep := range map[string]func(root string){
+		"rendered": func(root string) {
+			writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+			saveState(t, root, &engine.State{
+				Done:    map[string]bool{"infra:main-tf": true},
+				Outputs: engine.Outputs{"rendered_fingerprint": "hetzner/nbg1/cx23"},
+			})
+		},
+		"tfstate": func(root string) {
+			writeFile(t, root, "infra/terraform.tfstate", `{"version":4,"resources":[{"type":"hcloud_ssh_key"}]}`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, _ := applyEnv(t)
+			prov := &planProvider{quota: &cloud.QuotaStatus{Reason: planQuotaMsg}}
+			t.Cleanup(cloud.Register(prov))
+			prep(root)
+			out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+			if err != nil {
+				t.Fatalf("apply blocked on quota while resuming: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, planQuotaMsg+" (not blocking") {
+				t.Errorf("missing quota warning in:\n%s", out)
+			}
+		})
 	}
 }

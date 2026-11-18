@@ -314,7 +314,7 @@ type fakeProviderAs struct {
 func (f fakeProviderAs) ID() string { return f.id }
 
 func TestHetznerQuotaNotChecked(t *testing.T) {
-	got, err := (&hetzner{}).Quota(context.Background(), "nbg1", "cx23")
+	got, err := (&hetzner{}).Quota(context.Background(), "nbg1", "cx23", false)
 	if err != nil || !got.OK || !strings.HasPrefix(got.Reason, "not checked") {
 		t.Errorf("Quota = %+v, %v", got, err)
 	}

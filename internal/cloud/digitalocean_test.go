@@ -310,11 +310,11 @@ func fakeDOQuota(t *testing.T, limit, droplets int) *digitalocean {
 }
 
 func TestDigitaloceanQuota(t *testing.T) {
-	got, err := fakeDOQuota(t, 3, 2).Quota(context.Background(), "fra1", "s-1vcpu-1gb")
+	got, err := fakeDOQuota(t, 3, 2).Quota(context.Background(), "fra1", "s-1vcpu-1gb", false)
 	if err != nil || !got.OK {
 		t.Fatalf("2 of 3: %+v, %v", got, err)
 	}
-	got, err = fakeDOQuota(t, 3, 3).Quota(context.Background(), "fra1", "s-1vcpu-1gb")
+	got, err = fakeDOQuota(t, 3, 3).Quota(context.Background(), "fra1", "s-1vcpu-1gb", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,5 +324,17 @@ func TestDigitaloceanQuota(t *testing.T) {
 	}
 	if strings.Contains(got.Reason, "goodtoken") {
 		t.Error("token leaked")
+	}
+}
+
+// A resize or replacement adds no droplet: N of N is fine, over the limit is not.
+func TestDigitaloceanQuotaReplacing(t *testing.T) {
+	got, err := fakeDOQuota(t, 3, 3).Quota(context.Background(), "fra1", "s-2vcpu-4gb", true)
+	if err != nil || !got.OK {
+		t.Errorf("replacing at 3 of 3: %+v, %v", got, err)
+	}
+	got, err = fakeDOQuota(t, 3, 4).Quota(context.Background(), "fra1", "s-2vcpu-4gb", true)
+	if err != nil || got.OK || !strings.Contains(got.Reason, "4 of 3 in use") {
+		t.Errorf("replacing at 4 of 3: %+v, %v", got, err)
 	}
 }

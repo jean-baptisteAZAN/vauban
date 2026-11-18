@@ -239,8 +239,11 @@ func bearerClient(token, apiURL string) *http.Client {
 
 // Quota compares the account droplet_limit (GET /v2/account) with the
 // number of droplets (GET /v2/droplets meta.total). The limit is account
-// wide, so size and region do not matter.
-func (d *digitalocean) Quota(ctx context.Context, _, _ string) (QuotaStatus, error) {
+// wide, so size and region do not matter. When replacing, the change adds no
+// droplet (a resize is in place, and the generated tf has no
+// create_before_destroy), so it fails only when the account is already over
+// the limit.
+func (d *digitalocean) Quota(ctx context.Context, _, _ string, replacing bool) (QuotaStatus, error) {
 	c, err := d.client()
 	if err != nil {
 		return QuotaStatus{}, err
@@ -259,7 +262,8 @@ func (d *digitalocean) Quota(ctx context.Context, _, _ string) (QuotaStatus, err
 	if resp == nil || resp.Meta == nil {
 		return QuotaStatus{OK: true, Reason: "not checked: droplet count not reported"}, nil
 	}
-	if used := resp.Meta.Total; used >= acct.DropletLimit {
+	used := resp.Meta.Total
+	if used > acct.DropletLimit || (!replacing && used == acct.DropletLimit) {
 		return QuotaStatus{Reason: fmt.Sprintf("digitalocean: droplet limit reached (%d of %d in use) — delete a droplet or request a higher limit at %s",
 			used, acct.DropletLimit, QuotaURL("digitalocean"))}, nil
 	}

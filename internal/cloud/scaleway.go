@@ -324,15 +324,20 @@ func (s *scaleway) typeQuotas(ctx context.Context, c *scw.Client, zone scw.Zone)
 			continue
 		}
 		typ := strings.ReplaceAll(name, "_", "-")
+		// The zone entry wins, even when unlimited (Limit nil); the global
+		// entry applies only when there is no zone entry.
+		var zoneLimit, globalLimit *iam.QuotumLimit
 		for _, l := range q.Limits {
-			if l == nil || l.Limit == nil {
-				continue
+			switch {
+			case l == nil:
+			case l.Zone != nil && *l.Zone == zone:
+				zoneLimit = l
+			case l.Global != nil && *l.Global:
+				globalLimit = l
 			}
-			if l.Zone != nil && *l.Zone == zone {
-				out[typ] = *l.Limit
-			} else if _, set := out[typ]; !set && l.Global != nil && *l.Global {
-				out[typ] = *l.Limit
-			}
+		}
+		if lim := cmp.Or(zoneLimit, globalLimit); lim != nil && lim.Limit != nil {
+			out[typ] = *lim.Limit
 		}
 	}
 	return out, nil
@@ -358,8 +363,10 @@ func scalewayQuotaErr(what string, err error) error {
 
 // Quota checks the organization's quota for size in zone (IAM ListQuota)
 // against the servers of that type already there (Instance dashboard,
-// GET /instance/v1/zones/{zone}/dashboard).
-func (s *scaleway) Quota(ctx context.Context, zone, size string) (QuotaStatus, error) {
+// GET /instance/v1/zones/{zone}/dashboard). The quota is per type and zone,
+// so replacing does not change the check: a server of another type or zone
+// does not count against it.
+func (s *scaleway) Quota(ctx context.Context, zone, size string, _ bool) (QuotaStatus, error) {
 	z, err := scw.ParseZone(zone)
 	if err != nil {
 		return QuotaStatus{}, fmt.Errorf("scaleway: invalid zone %q", zone)

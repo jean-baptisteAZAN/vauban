@@ -81,7 +81,7 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	if err != nil {
 		return nil, err
 	}
-	if err := checkCloud(p.Root, st, c); err != nil {
+	if err := CheckCloud(p.Root, st, c); err != nil {
 		return nil, err
 	}
 	prov, err := cloud.Get(c.Cloud)
@@ -111,10 +111,12 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	}, nil
 }
 
-// checkCloud refuses a cloud change while servers are applied: the applied
+// CheckCloud refuses a cloud change while servers are applied: the applied
 // fingerprint, or the main.tf on disk, names another cloud. With no applied
 // fingerprint (never applied, or after vauban destroy) any cloud is allowed.
-func checkCloud(root string, st *engine.State, c *config.Config) error {
+// plan and apply call it before saving vauban.yaml, so a refused change is
+// never persisted.
+func CheckCloud(root string, st *engine.State, c *config.Config) error {
 	applied := st.Outputs["infra_fingerprint"]
 	if applied == "" {
 		return nil
@@ -145,6 +147,18 @@ func StaleSteps(root string, st *engine.State, c *config.Config) []string {
 		return nil
 	}
 	return []string{"infra:main-tf", "infra:plan", "infra:apply", "infra:output"}
+}
+
+// AppliedCloud returns the cloud the infra under root was applied (or last
+// rendered) for: the applied fingerprint in st, else the fingerprint in the
+// managed main.tf, else "".
+func AppliedCloud(root string, st *engine.State) string {
+	for _, fp := range []string{st.Outputs["infra_fingerprint"], RenderedFingerprint(root)} {
+		if id, _, _ := strings.Cut(fp, "/"); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // RenderedFingerprint returns the fingerprint recorded in the managed

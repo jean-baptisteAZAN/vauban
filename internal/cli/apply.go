@@ -20,7 +20,8 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/ui"
 )
 
-// quotaError matches the (redacted) cloud errors of a refused server:
+// quotaError matches the (redacted) cloud errors of a refused server, on
+// the infra:apply step only:
 // Scaleway "quota exceeded(s)", Hetzner "resource_limit_exceeded",
 // DigitalOcean "droplet limit".
 var quotaError = regexp.MustCompile(`(?i)quota|limit[_ ]exceeded|droplet limit|limit reached`)
@@ -74,8 +75,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	// Saved before the plan builds, so answers survive a failing plan.
-	if err := c.Save(root); err != nil {
+	if err := saveConfig(root, c); err != nil {
 		return err
 	}
 	confirmed := false
@@ -91,10 +91,13 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 
 	w := cmd.OutOrStdout()
-	if err := engine.Preflight(pl.p, c, pl.mods, pl.newServer(c)); err != nil {
-		ui.Warnings(w, "cannot apply:", strings.Split(err.Error(), "\n"))
+	notices, err := engine.Preflight(pl.p, c, pl.mods, pl.preflightOptions(root, c))
+	if err != nil {
+		ui.Warnings(w, "cannot apply:", append(strings.Split(err.Error(), "\n"), notices.Warnings...))
 		return &ExitError{Code: 1, Err: errors.New("preflight failed — nothing was applied")}
 	}
+	ui.Warnings(w, "warnings:", notices.Warnings)
+	writeNotes(w, notices.Notes)
 	writeConfigSummary(w, p, c)
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
@@ -137,7 +140,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		return &ExitError{Code: 130, Err: errInterrupted}
 	case errors.Is(err, engine.ErrNotConfirmed):
 		return &ExitError{Code: 3, Err: errNotConfirmed}
-	case err != nil && quotaError.MatchString(err.Error()):
+	case err != nil && strings.HasPrefix(err.Error(), "infra:apply:") && quotaError.MatchString(err.Error()):
 		return fmt.Errorf("%w\n%s", err, cloud.QuotaHint(c.Cloud, c.Region, c.Size))
 	case err != nil:
 		return err
