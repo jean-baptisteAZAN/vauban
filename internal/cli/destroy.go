@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -24,7 +26,10 @@ import (
 // deploySecrets are the GitHub secrets the deploy module sets.
 var deploySecrets = []string{"DEPLOY_HOST", "DEPLOY_SSH_KEY", "DEPLOY_DOMAIN"}
 
-var errDestroyNeedsConfirm = errors.New("destroy needs a terminal or --confirm <project>")
+var (
+	errDestroyNeedsConfirm = errors.New("destroy needs a terminal or --confirm <project>")
+	errDestroyInterrupted  = errors.New("interrupted — state kept; rerun `vauban destroy` to finish")
+)
 
 func newDestroyCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -42,7 +47,6 @@ func newDestroyCmd() *cobra.Command {
 }
 
 func runDestroy(cmd *cobra.Command, _ []string) error {
-	ctx := cmd.Context()
 	f := cmd.Flags()
 	dir, _ := f.GetString("dir")
 	root, err := filepath.Abs(dir)
@@ -67,8 +71,17 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	managed := infra.IsManaged(root)
 	tofu, _ := tools.Tofu()
 	tofuArgs := []string{"-chdir=infra", "destroy", "-auto-approve", "-input=false"}
+	tty := interactive()
+	ctx, sig := watchSignals(cmd.Context(), cmd.ErrOrStderr(), tty)
+	defer sig.stop()
+	run := sig.runner(cmdRunner)
 
 	w := cmd.OutOrStdout()
+	creds, problems := destroyPreflight(ctx, root, c, p.GitHubRepo, managed)
+	if len(problems) > 0 {
+		ui.Warnings(w, "cannot destroy:", problems)
+		return &ExitError{Code: 1, Err: errors.New("preflight failed — nothing was destroyed")}
+	}
 	ui.Heading(w, c.Project)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "destroy will:")
@@ -91,7 +104,7 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	switch {
 	case f.Changed("confirm"):
 		typed, _ = f.GetString("confirm")
-	case interactive():
+	case tty:
 		ok, err := typedProject(ctx, c.Project, "to destroy it")
 		if err != nil {
 			return err
@@ -107,21 +120,24 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	}
 
 	prog := ui.NewProgress(w)
+	defer prog.Pause()
+	// interrupted maps a failure caused by a signal to exit 130.
+	interrupted := func(err error) error {
+		switch {
+		case sig.forced.Load():
+			return &ExitError{Code: 130} // the forced-stop notice is already printed
+		case ctx.Err() != nil:
+			return &ExitError{Code: 130, Err: errDestroyInterrupted}
+		}
+		return err
+	}
 	if managed {
-		prov, err := cloud.Get(c.Cloud)
-		if err != nil {
-			return err
-		}
-		creds, err := prov.CredentialsEnv()
-		if err != nil {
-			return err
-		}
 		const id, desc = "infra:destroy", "destroy cloud resources (tofu destroy)"
 		prog.Update(id, desc, engine.PhaseStart, nil)
-		_, err = cmdRunner.Run(ctx, engine.Cmd{Dir: root, Name: tofu, Args: tofuArgs, Env: creds})
+		_, err = run.Run(ctx, engine.Cmd{Dir: root, Name: tofu, Args: tofuArgs, Env: creds})
 		if err != nil {
 			prog.Update(id, desc, engine.PhaseFail, err)
-			return fmt.Errorf("tofu destroy failed — secrets and state left untouched: %w", err)
+			return interrupted(fmt.Errorf("tofu destroy failed — secrets and state left untouched: %w", err))
 		}
 		prog.Update(id, desc, engine.PhaseDone, nil)
 	}
@@ -129,9 +145,12 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	var failed []string
 	if p.GitHubRepo != "" {
 		for _, s := range deploySecrets {
+			if ctx.Err() != nil {
+				return interrupted(ctx.Err())
+			}
 			desc := "gh secret delete " + s + " --repo " + p.GitHubRepo
 			prog.Update(s, desc, engine.PhaseStart, nil)
-			_, err := cmdRunner.Run(ctx, engine.Cmd{Dir: root, Name: "gh", Args: []string{"secret", "delete", s, "--repo", p.GitHubRepo}})
+			_, err := run.Run(ctx, engine.Cmd{Dir: root, Name: "gh", Args: []string{"secret", "delete", s, "--repo", p.GitHubRepo}})
 			switch {
 			case err == nil:
 				prog.Update(s, desc, engine.PhaseDone, nil)
@@ -157,10 +176,38 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// secretNotFound reports whether gh failed because the secret does not exist.
+// secretNotFound reports whether gh failed because the secret does not
+// exist: gh secret delete then prints "HTTP 404". Anything else (no gh, no
+// repository, no access) is a real failure.
 func secretNotFound(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "404")
+	return strings.Contains(err.Error(), "HTTP 404")
+}
+
+// destroyPreflight checks, before confirmation, what destroy needs: gh on
+// PATH and authenticated (when there are secrets to delete), and for managed
+// infra tofu and the cloud credentials, which it returns.
+func destroyPreflight(ctx context.Context, root string, c *config.Config, repo string, managed bool) (creds, problems []string) {
+	if repo != "" {
+		if _, err := exec.LookPath("gh"); err != nil {
+			problems = append(problems, "gh not found (install https://cli.github.com, then run gh auth login)")
+		} else if _, err := engine.PreflightRunner.Run(ctx, engine.Cmd{Dir: root, Name: "gh", Args: []string{"auth", "status"}}); err != nil {
+			// The command's output is discarded: it may describe the token.
+			problems = append(problems, "gh is not authenticated (run gh auth login)")
+		}
+	}
+	if managed {
+		if _, ok := tools.Tofu(); !ok {
+			problems = append(problems, "OpenTofu (tofu) not found (install: https://opentofu.org/docs/intro/install/)")
+		}
+		prov, err := cloud.Get(c.Cloud)
+		if err == nil {
+			creds, err = prov.CredentialsEnv()
+		}
+		if err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	return creds, problems
 }
 
 // writeLeftInPlace lists what destroy keeps: generated files, the local
@@ -188,11 +235,15 @@ func writeLeftInPlace(w io.Writer, root string, c *config.Config, st *engine.Sta
 	kept = slices.Compact(kept)
 	key := st.Outputs["deploy_key_path"]
 	if key == "" {
-		key, _ = infra.DeployKeyPath(c.Project)
+		if path, err := infra.DeployKeyPath(c.Project); err == nil {
+			key = path
+		}
 	}
-	for _, k := range []string{key, key + ".pub"} {
-		if _, err := os.Stat(k); k != ".pub" && err == nil {
-			kept = append(kept, k)
+	if key != "" {
+		for _, k := range []string{key, key + ".pub"} {
+			if _, err := os.Stat(k); err == nil {
+				kept = append(kept, k)
+			}
 		}
 	}
 	ui.Warnings(w, "left in place (delete them yourself if you no longer need them):", kept)

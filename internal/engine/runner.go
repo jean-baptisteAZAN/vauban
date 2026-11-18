@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Runner runs external commands.
@@ -22,15 +24,28 @@ type Cmd struct {
 	Stdin     io.Reader
 }
 
-// ExecRunner runs commands with os/exec.
-type ExecRunner struct{}
+// ExecRunner runs commands with os/exec. Each command runs in its own process
+// group, so a terminal Ctrl-C reaches only vauban, which forwards it once.
+type ExecRunner struct {
+	// Kill, when closed, SIGKILLs the running command's process group (a
+	// forced stop). Nil means never.
+	Kill <-chan struct{}
+}
+
+// pipeWaitDelay bounds how long Run waits for output pipes once the command
+// has exited, e.g. when a grandchild outside its group still holds them.
+const pipeWaitDelay = 5 * time.Second
 
 // Run executes cmd and returns its stdout; on failure the error includes stderr.
-// When ctx is cancelled the command gets SIGINT, not SIGKILL, and Run waits
-// for it to exit: tofu then stops cleanly and saves its state.
-func (ExecRunner) Run(ctx context.Context, cmd Cmd) ([]byte, error) {
-	c := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
-	c.Cancel = func() error { return c.Process.Signal(os.Interrupt) }
+// When ctx is cancelled the command's group gets one SIGINT, not SIGKILL, and
+// Run waits for it to exit: tofu then stops cleanly and saves its state.
+func (r ExecRunner) Run(ctx context.Context, cmd Cmd) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c := exec.Command(cmd.Name, cmd.Args...)
+	ownProcessGroup(c)
+	c.WaitDelay = pipeWaitDelay
 	c.Dir = cmd.Dir
 	if len(cmd.Env) > 0 {
 		c.Env = append(os.Environ(), cmd.Env...)
@@ -47,7 +62,29 @@ func (ExecRunner) Run(ctx context.Context, cmd Cmd) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
-	if err := c.Run(); err != nil {
+	if err := c.Start(); err != nil {
+		return nil, fmt.Errorf("%s: %w", cmd.Name, err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = signalGroup(c.Process, syscall.SIGINT)
+		case <-r.Kill:
+			_ = signalGroup(c.Process, syscall.SIGKILL)
+			return
+		case <-exited:
+			return
+		}
+		select {
+		case <-r.Kill:
+			_ = signalGroup(c.Process, syscall.SIGKILL)
+		case <-exited:
+		}
+	}()
+	err := c.Wait()
+	close(exited)
+	if err != nil {
 		if msg := strings.TrimSpace(redact(stderr.String(), cmd.Env, stdin)); msg != "" {
 			return stdout.Bytes(), fmt.Errorf("%s: %w: %s", cmd.Name, err, msg)
 		}

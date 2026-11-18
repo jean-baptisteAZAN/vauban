@@ -5,11 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -41,12 +38,6 @@ func newApplyCmd() *cobra.Command {
 }
 
 func runApply(cmd *cobra.Command, _ []string) error {
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	// After the first signal, restore the default handling so a second
-	// Ctrl-C kills vauban.
-	go func() { <-ctx.Done(); stop() }()
-
 	f := cmd.Flags()
 	dir, _ := f.GetString("dir")
 	force, _ := f.GetBool("force")
@@ -55,6 +46,8 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if !tty && !yes {
 		return &ExitError{Code: 2, Err: errNeedTTY}
 	}
+	ctx, sig := watchSignals(cmd.Context(), cmd.ErrOrStderr(), tty)
+	defer sig.stop()
 	root, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -102,17 +95,17 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	env := &engine.Env{
 		Root:     root,
 		Force:    force,
-		Run:      cmdRunner,
+		Run:      sig.runner(cmdRunner),
+		Log:      prog.Log(),
 		Confirm:  confirmDestructive(ctx, w, prog, c.Project, force, tty),
 		Progress: prog.Update,
-	}
-	if !ui.Styled() {
-		env.Log = w // "skip (exists)" notes; they would break the spinner
 	}
 	err = engine.Execute(ctx, pl.steps(), pl.st, env)
 	prog.Pause()
 	switch {
-	case ctx.Err() != nil:
+	case err != nil && sig.forced.Load():
+		return &ExitError{Code: 130} // the forced-stop notice is already printed
+	case err != nil && ctx.Err() != nil:
 		return &ExitError{Code: 130, Err: errInterrupted}
 	case errors.Is(err, engine.ErrNotConfirmed):
 		return &ExitError{Code: 3, Err: errNotConfirmed}

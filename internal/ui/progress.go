@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -21,6 +22,7 @@ type Progress struct {
 	spin   bool // the terminal has a size; a 0x0 pty renders nothing
 	prog   *tea.Program
 	done   chan struct{}
+	exists bool // the running step reported "skip (exists)"
 }
 
 // NewProgress writes to w, styled when Styled() reports so.
@@ -35,6 +37,14 @@ func NewProgress(w io.Writer) *Progress {
 
 // Update has the signature of engine.Env.Progress.
 func (p *Progress) Update(_, describe string, phase engine.Phase, err error) {
+	switch phase {
+	case engine.PhaseStart:
+		p.exists = false
+	case engine.PhaseDone:
+		if p.exists {
+			phase, describe = engine.PhaseSkip, describe+" (exists)"
+		}
+	}
 	if !p.styled {
 		switch phase {
 		case engine.PhaseStart:
@@ -66,6 +76,27 @@ func (p *Progress) Update(_, describe string, phase engine.Phase, err error) {
 		return
 	}
 	p.stop(line)
+}
+
+// Log returns a writer for engine.Env.Log. A "skip (exists) <path>" note
+// turns the running step's final line into a skip; other notes are printed.
+func (p *Progress) Log() io.Writer { return progressLog{p} }
+
+type progressLog struct{ p *Progress }
+
+func (l progressLog) Write(b []byte) (int, error) {
+	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if strings.HasPrefix(line, "skip (exists) ") {
+			l.p.exists = true
+			continue
+		}
+		l.p.Pause()
+		if l.p.styled {
+			line = Muted.Render(line)
+		}
+		fmt.Fprintln(l.p.w, line)
+	}
+	return len(b), nil
 }
 
 // Pause removes the running spinner line, if any, so the caller can print or

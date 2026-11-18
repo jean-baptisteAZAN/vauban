@@ -162,3 +162,44 @@ func TestDestroyWithoutConfig(t *testing.T) {
 		t.Error("vauban.yaml created")
 	}
 }
+
+func TestDestroyPreflightMissingGh(t *testing.T) {
+	root, fr := destroyEnv(t)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tofu"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	wantExit(t, err, 1, "", out)
+	if !strings.Contains(out, "gh not found") {
+		t.Errorf("missing gh problem in:\n%s", out)
+	}
+	if len(fr.Calls) != 0 || !exists(statePath(root)) {
+		t.Errorf("destroy acted despite failed preflight: %q", callLines(fr))
+	}
+}
+
+func TestDestroyPreflightGhNotAuthenticated(t *testing.T) {
+	root, fr := destroyEnv(t)
+	old := engine.PreflightRunner
+	engine.PreflightRunner = &engine.FakeRunner{Errors: map[string]error{"gh auth": errors.New("not logged in")}}
+	t.Cleanup(func() { engine.PreflightRunner = old })
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	wantExit(t, err, 1, "", out)
+	if !strings.Contains(out, "gh is not authenticated") || len(fr.Calls) != 0 {
+		t.Errorf("calls %q, out:\n%s", callLines(fr), out)
+	}
+}
+
+func TestDestroyRepoNotFoundIsReported(t *testing.T) {
+	root, fr := destroyEnv(t)
+	fr.Errors = map[string]error{
+		"gh secret delete DEPLOY_SSH_KEY --repo acme/shop": errors.New("gh: exit status 1: GraphQL: Could not resolve to a Repository (repository not found)"),
+	}
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	wantExit(t, err, 1, "", out)
+	if !strings.Contains(err.Error(), "DEPLOY_SSH_KEY") {
+		t.Errorf("error = %q", err)
+	}
+}

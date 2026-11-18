@@ -38,7 +38,7 @@ func applyEnv(t *testing.T) (string, *engine.FakeRunner) {
 	t.Helper()
 	root, _ := planEnv(t, "go-app")
 	bin := t.TempDir()
-	for _, name := range []string{"tofu", "ssh-keygen"} {
+	for _, name := range []string{"tofu", "ssh-keygen", "gh"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -272,5 +272,20 @@ func TestQuietExitOnUserAbort(t *testing.T) {
 	errorHandler(&buf, fang.Styles{}, err)
 	if buf.Len() != 0 {
 		t.Errorf("aborted run printed %q", buf.String())
+	}
+}
+
+func TestApplyStyledAndPlainShowExistingFileAsSkipped(t *testing.T) {
+	root, _ := applyEnv(t)
+	writeFile(t, root, "Dockerfile", "FROM scratch\n")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[skip] write Dockerfile (exists)\n") || strings.Contains(out, "[ok] write Dockerfile") {
+		t.Errorf("existing Dockerfile not reported as skipped:\n%s", out)
+	}
+	if strings.Contains(out, "skip (exists) Dockerfile") {
+		t.Errorf("raw log line leaked:\n%s", out)
 	}
 }

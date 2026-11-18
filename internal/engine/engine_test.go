@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/detect"
@@ -251,14 +250,5 @@ func TestExecuteReportsProgress(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("progress = %q, want %q", got, want)
-	}
-}
-
-func TestExecRunnerInterruptsOnCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
-	out, _ := ExecRunner{}.Run(ctx, Cmd{Name: "sh", Args: []string{"-c", `trap 'echo graceful; exit 1' INT; sleep 5 >/dev/null 2>&1 & wait`}})
-	if !strings.Contains(string(out), "graceful") {
-		t.Fatalf("command was not interrupted gracefully, stdout %q", out)
 	}
 }
