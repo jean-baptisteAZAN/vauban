@@ -20,8 +20,12 @@ import (
 
 const planToken = "hcloud-plan-secret"
 
-// planProvider stands in for hetzner without network access.
-type planProvider struct{}
+// planProvider stands in for hetzner without network access. quota, when
+// set, is what Quota returns; quotaCalls counts the calls.
+type planProvider struct {
+	quota      *cloud.QuotaStatus
+	quotaCalls int
+}
 
 func (*planProvider) ID() string            { return "hetzner" }
 func (*planProvider) DefaultRegion() string { return "nbg1" }
@@ -35,6 +39,13 @@ func (*planProvider) Regions(context.Context) ([]cloud.Option, error) {
 }
 func (*planProvider) Sizes(context.Context, string) ([]cloud.Option, error) {
 	return []cloud.Option{{ID: "cx23", Label: "cx23"}}, nil
+}
+func (p *planProvider) Quota(context.Context, string, string) (cloud.QuotaStatus, error) {
+	p.quotaCalls++
+	if p.quota != nil {
+		return *p.quota, nil
+	}
+	return cloud.QuotaStatus{OK: true}, nil
 }
 func (*planProvider) Terraform(in cloud.TFInput) ([]byte, error) {
 	return []byte("# tf " + in.Region + "\n"), nil
@@ -630,5 +641,38 @@ func TestPlanDeployKeyExists(t *testing.T) {
 	}
 	if strings.Contains(out, "PRIVATE KEY") {
 		t.Errorf("key material in output:\n%s", out)
+	}
+}
+
+const planQuotaMsg = "hetzner: quota for cx23 in nbg1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.hetzner.com (project → Limits → Request change)"
+
+func TestPlanQuotaWarning(t *testing.T) {
+	root, prov := planEnv(t, "go-app")
+	prov.quota = &cloud.QuotaStatus{Reason: planQuotaMsg}
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan must not fail on quota: %v\n%s", err, out)
+	}
+	i := strings.Index(out, "before apply:")
+	if i < 0 || !strings.Contains(out[i:], planQuotaMsg) {
+		t.Errorf("missing quota warning in:\n%s", out)
+	}
+}
+
+// An applied server of the same cloud/region/size needs no quota check.
+func TestPlanNoQuotaCheckWhenApplied(t *testing.T) {
+	root, prov := planEnv(t, "go-app")
+	st := staleState()
+	st.Outputs["deployed_ip"] = "203.0.113.9"
+	st.Outputs["deployed_domain"] = "203-0-113-9.sslip.io"
+	saveState(t, root, st)
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+	prov.quota = &cloud.QuotaStatus{Reason: planQuotaMsg}
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if prov.quotaCalls != 0 || strings.Contains(out, planQuotaMsg) {
+		t.Errorf("quota checked for an applied server (%d calls):\n%s", prov.quotaCalls, out)
 	}
 }

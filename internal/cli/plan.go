@@ -90,7 +90,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "DNS: point "+c.Domain+" to the server IP (shown after apply)")
 	}
-	if err := engine.Preflight(pl.p, c, pl.mods); err != nil {
+	if err := engine.Preflight(pl.p, c, pl.mods, pl.newServer(c)); err != nil {
 		ui.Warnings(w, "before apply:", strings.Split(err.Error(), "\n"))
 	}
 	ui.PlanFooter(w)
@@ -284,6 +284,13 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 		}
 	}
 	return pl, nil
+}
+
+// newServer reports whether apply may create a server, so the cloud quota
+// matters: infra:apply is to run and the applied infra (if any) has another
+// cloud/region/size.
+func (pl *planned) newServer(c *config.Config) bool {
+	return !pl.st.Done["infra:apply"] && pl.st.Outputs["infra_fingerprint"] != infraFingerprint(c)
 }
 
 func (pl *planned) steps() []engine.Step {

@@ -236,3 +236,32 @@ func bearerClient(token, apiURL string) *http.Client {
 	}
 	return &http.Client{Transport: bearerTransport{token, host}}
 }
+
+// Quota compares the account droplet_limit (GET /v2/account) with the
+// number of droplets (GET /v2/droplets meta.total). The limit is account
+// wide, so size and region do not matter.
+func (d *digitalocean) Quota(ctx context.Context, _, _ string) (QuotaStatus, error) {
+	c, err := d.client()
+	if err != nil {
+		return QuotaStatus{}, err
+	}
+	acct, _, err := c.Account.Get(ctx)
+	if err != nil {
+		return QuotaStatus{}, fmt.Errorf("digitalocean: read account: %w", err)
+	}
+	if acct.DropletLimit <= 0 {
+		return QuotaStatus{OK: true, Reason: "not checked: no droplet limit reported"}, nil
+	}
+	_, resp, err := c.Droplets.List(ctx, &godo.ListOptions{PerPage: 1})
+	if err != nil {
+		return QuotaStatus{}, fmt.Errorf("digitalocean: count droplets: %w", err)
+	}
+	if resp == nil || resp.Meta == nil {
+		return QuotaStatus{OK: true, Reason: "not checked: droplet count not reported"}, nil
+	}
+	if used := resp.Meta.Total; used >= acct.DropletLimit {
+		return QuotaStatus{Reason: fmt.Sprintf("digitalocean: droplet limit reached (%d of %d in use) — delete a droplet or request a higher limit at %s",
+			used, acct.DropletLimit, QuotaURL("digitalocean"))}, nil
+	}
+	return QuotaStatus{OK: true}, nil
+}

@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -281,5 +282,47 @@ func TestBearerClientScopedToAPIHost(t *testing.T) {
 	want := []string{"api:Bearer tok", "other:"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// fakeDOQuota serves /v2/account and a droplet count for Quota.
+func fakeDOQuota(t *testing.T, limit, droplets int) *digitalocean {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/account", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"account":{"droplet_limit":%d,"email":"me@example.com","status":"active"}}`, limit)
+	})
+	mux.HandleFunc("/v2/droplets", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"droplets":[],"links":{},"meta":{"total":%d}}`, droplets)
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer goodtoken" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	doctlHome(t)
+	t.Setenv("DIGITALOCEAN_TOKEN", "goodtoken")
+	return &digitalocean{endpoint: srv.URL}
+}
+
+func TestDigitaloceanQuota(t *testing.T) {
+	got, err := fakeDOQuota(t, 3, 2).Quota(context.Background(), "fra1", "s-1vcpu-1gb")
+	if err != nil || !got.OK {
+		t.Fatalf("2 of 3: %+v, %v", got, err)
+	}
+	got, err = fakeDOQuota(t, 3, 3).Quota(context.Background(), "fra1", "s-1vcpu-1gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "digitalocean: droplet limit reached (3 of 3 in use) — delete a droplet or request a higher limit at https://cloud.digitalocean.com/account/team (Droplet limit → Increase)"
+	if got.OK || got.Reason != want {
+		t.Errorf("3 of 3: %+v", got)
+	}
+	if strings.Contains(got.Reason, "goodtoken") {
+		t.Error("token leaked")
 	}
 }

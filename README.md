@@ -95,7 +95,7 @@ Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--
 
 1. **`doctor`** scans the repo on disk (no network): stack, what exists, what is missing, which tools are installed.
 2. **`plan`** asks for cloud, region, size, domain and port (regions and sizes come from the cloud's API), saves `vauban.yaml`, and prints every file and command `apply` would run. Nothing else changes.
-3. **`apply`** checks everything up front (GitHub remote, `gh` login, `tofu`, `ssh-keygen`, cloud credentials), asks for confirmation, then writes the files, generates the deploy key, runs `tofu init/plan/apply`, reads the server IP from `tofu output` and sets the GitHub secrets.
+3. **`apply`** checks everything up front (GitHub remote, `gh` login, `tofu`, `ssh-keygen`, cloud credentials, the account quota for a new server), asks for confirmation, then writes the files, generates the deploy key, runs `tofu init/plan/apply`, reads the server IP from `tofu output` and sets the GitHub secrets.
 
 After that, vauban is out of the loop: your next `git push` does the rest.
 
@@ -138,6 +138,18 @@ Stacks: **Go**, **Node/TypeScript**, **Python**. Your app must listen on `0.0.0.
 | Hetzner | `HCLOUD_TOKEN`, else `~/.config/hcloud/cli.toml` |
 
 Node: the `start` script must not call pnpm, yarn or bun: the image runs `npm start`.
+
+### Quotas
+
+A size the cloud lists as available can still be refused by your account's quota. vauban checks before it creates a server:
+
+| Cloud | What is checked |
+|---|---|
+| Scaleway | The organization's per-type quota (`cp_servers_type_<TYPE>` per zone, IAM `GET /iam/v1alpha1/quota`) against the servers of that type in the zone (Instance dashboard). The size picker leaves out types whose quota is 0. Reading quotas needs an API key allowed to read the organization's quotas; without that permission (or without `SCW_DEFAULT_ORGANIZATION_ID` / a readable project), quotas are not checked. |
+| DigitalOcean | The account `droplet_limit` (`GET /v2/account`) against the number of droplets. |
+| Hetzner | Not checked: the Hetzner Cloud API does not expose project limits. |
+
+When a new server would be created, `apply`'s preflight fails before any step if the quota is exhausted, e.g. `scaleway: quota for STARDUST1-S in fr-par-1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas`; `plan` shows the same under `before apply:`. If `tofu apply` is still refused for a quota or limit, the error ends with the same advice.
 
 GitHub access comes from `gh auth login`. vauban stores no credentials itself.
 

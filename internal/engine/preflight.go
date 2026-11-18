@@ -23,7 +23,9 @@ const preflightTimeout = 20 * time.Second
 // need: a valid config, and for deploy a GitHub remote and an authenticated
 // gh, for infra tofu, ssh-keygen and working cloud credentials. It returns
 // one error listing every problem, or nil. Messages never include secrets.
-func Preflight(p *detect.Project, c *config.Config, mods []Module) error {
+// With checkQuota (apply may create a server), it also asks the cloud whether
+// the account's quota allows one more server of the configured size.
+func Preflight(p *detect.Project, c *config.Config, mods []Module, checkQuota bool) error {
 	selected := make(map[string]bool, len(mods))
 	for _, m := range mods {
 		selected[m.ID()] = true
@@ -58,6 +60,12 @@ func Preflight(p *detect.Project, c *config.Config, mods []Module) error {
 				errs = append(errs, err)
 			} else if err := prov.CheckAuth(ctx); err != nil {
 				errs = append(errs, err)
+			} else if checkQuota {
+				if q, err := prov.Quota(ctx, c.Region, c.Size); err != nil {
+					errs = append(errs, err)
+				} else if !q.OK {
+					errs = append(errs, errors.New(q.Reason))
+				}
 			}
 		}
 	}

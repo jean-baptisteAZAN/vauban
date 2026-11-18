@@ -47,6 +47,9 @@ func (*fakeProvider) Regions(context.Context) ([]cloud.Option, error) {
 func (*fakeProvider) Sizes(context.Context, string) ([]cloud.Option, error) {
 	return nil, nil
 }
+func (*fakeProvider) Quota(context.Context, string, string) (cloud.QuotaStatus, error) {
+	return cloud.QuotaStatus{OK: true}, nil
+}
 func (f *fakeProvider) Terraform(in cloud.TFInput) ([]byte, error) {
 	if f.got != nil {
 		*f.got = in

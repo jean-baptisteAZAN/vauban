@@ -18,6 +18,9 @@ const preflightToken = "super-secret-token-value"
 type preflightProvider struct {
 	credErr, authErr error
 	authCalled       *bool
+	quota            cloud.QuotaStatus
+	quotaErr         error
+	quotaCalled      *bool
 }
 
 func (preflightProvider) ID() string            { return "hetzner" }
@@ -38,6 +41,15 @@ func (preflightProvider) Sizes(context.Context, string) ([]cloud.Option, error) 
 	return nil, nil
 }
 func (preflightProvider) Terraform(cloud.TFInput) ([]byte, error) { return nil, nil }
+func (p preflightProvider) Quota(context.Context, string, string) (cloud.QuotaStatus, error) {
+	if p.quotaCalled != nil {
+		*p.quotaCalled = true
+	}
+	if p.quotaErr == nil && p.quota == (cloud.QuotaStatus{}) {
+		return cloud.QuotaStatus{OK: true}, nil
+	}
+	return p.quota, p.quotaErr
+}
 
 type idModule string
 
@@ -85,7 +97,7 @@ func goodConfig() *config.Config {
 func TestPreflightOK(t *testing.T) {
 	called := false
 	fr := preflightSetup(t, preflightProvider{authCalled: &called}, "tofu", "ssh-keygen")
-	err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods)
+	err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +115,7 @@ func TestPreflightCollectsEveryProblem(t *testing.T) {
 	fr.Errors = map[string]error{"gh auth status": errors.New("exit status 1")}
 	c := goodConfig()
 	c.AppPort = 0
-	err := Preflight(&detect.Project{}, c, allMods)
+	err := Preflight(&detect.Project{}, c, allMods, true)
 	if err == nil {
 		t.Fatal("no error")
 	}
@@ -130,7 +142,7 @@ func TestPreflightCollectsEveryProblem(t *testing.T) {
 
 func TestPreflightNoRemoteNoTofu(t *testing.T) {
 	preflightSetup(t, preflightProvider{}, "ssh-keygen")
-	err := Preflight(&detect.Project{}, goodConfig(), allMods)
+	err := Preflight(&detect.Project{}, goodConfig(), allMods, true)
 	if err == nil || !strings.Contains(err.Error(), "deploy needs a GitHub remote") || !strings.Contains(err.Error(), "OpenTofu (tofu) not found") {
 		t.Errorf("err = %v", err)
 	}
@@ -138,7 +150,7 @@ func TestPreflightNoRemoteNoTofu(t *testing.T) {
 
 func TestPreflightAuthRejected(t *testing.T) {
 	preflightSetup(t, preflightProvider{authErr: errors.New("hetzner: authentication check failed: 401")}, "tofu", "ssh-keygen")
-	err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods)
+	err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods, true)
 	if err == nil || !strings.Contains(err.Error(), "authentication check failed") {
 		t.Errorf("err = %v", err)
 	}
@@ -147,10 +159,57 @@ func TestPreflightAuthRejected(t *testing.T) {
 func TestPreflightOnlySelectedModules(t *testing.T) {
 	fr := preflightSetup(t, preflightProvider{credErr: errors.New("HCLOUD_TOKEN is not set")})
 	// container + ci need neither GitHub, tofu nor cloud credentials.
-	if err := Preflight(&detect.Project{}, goodConfig(), allMods[:2]); err != nil {
+	if err := Preflight(&detect.Project{}, goodConfig(), allMods[:2], true); err != nil {
 		t.Errorf("err = %v", err)
 	}
 	if len(fr.Calls) != 0 {
 		t.Errorf("calls = %v", fr.Calls)
+	}
+}
+
+const quotaMsg = "scaleway: quota for STARDUST1-S in fr-par-1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"
+
+func TestPreflightQuotaExceeded(t *testing.T) {
+	preflightSetup(t, preflightProvider{quota: cloud.QuotaStatus{Reason: quotaMsg}}, "tofu", "ssh-keygen")
+	err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods, true)
+	if err == nil || err.Error() != quotaMsg {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestPreflightQuotaNotCheckedIsOK(t *testing.T) {
+	preflightSetup(t, preflightProvider{quota: cloud.QuotaStatus{OK: true, Reason: "not checked: no API"}}, "tofu", "ssh-keygen")
+	if err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods, true); err != nil {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestPreflightQuotaError(t *testing.T) {
+	preflightSetup(t, preflightProvider{quotaErr: errors.New("hetzner: list quotas: 500")}, "tofu", "ssh-keygen")
+	err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods, true)
+	if err == nil || !strings.Contains(err.Error(), "list quotas: 500") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// Without a new server to create (already applied), quotas are not checked.
+func TestPreflightSkipsQuota(t *testing.T) {
+	called := false
+	preflightSetup(t, preflightProvider{quota: cloud.QuotaStatus{Reason: quotaMsg}, quotaCalled: &called}, "tofu", "ssh-keygen")
+	if err := Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods, false); err != nil {
+		t.Errorf("err = %v", err)
+	}
+	if called {
+		t.Error("Quota called")
+	}
+}
+
+// Quota is not checked when the credentials are rejected.
+func TestPreflightNoQuotaWithoutAuth(t *testing.T) {
+	called := false
+	preflightSetup(t, preflightProvider{authErr: errors.New("401"), quotaCalled: &called}, "tofu", "ssh-keygen")
+	_ = Preflight(&detect.Project{GitHubRepo: "acme/widget"}, goodConfig(), allMods, true)
+	if called {
+		t.Error("Quota called after a failed auth check")
 	}
 }

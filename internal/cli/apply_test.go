@@ -536,3 +536,35 @@ func TestApplyRedeployFooter(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyQuotaPreflightExit1(t *testing.T) {
+	root, fr := applyEnv(t)
+	prov := &planProvider{quota: &cloud.QuotaStatus{Reason: planQuotaMsg}}
+	t.Cleanup(cloud.Register(prov))
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	wantExit(t, err, 1, "preflight failed — nothing was applied", out)
+	if !strings.Contains(out, planQuotaMsg) {
+		t.Errorf("missing quota reason in:\n%s", out)
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
+	}
+}
+
+func TestApplyTofuQuotaErrorHint(t *testing.T) {
+	root, fr := applyEnv(t)
+	fr.Errors = map[string]error{tofuApplyCmd: errors.New("tofu: exit status 1: Error: scaleway-sdk-go: quota exceeded(s): cp_servers_type_STARDUST1_S has reached its quota (0/0)")}
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err == nil {
+		t.Fatalf("apply succeeded:\n%s", out)
+	}
+	hint := "hetzner: the account quota for cx23 in nbg1 looks exhausted — pick another size (vauban plan --size …) or request a quota increase at https://console.hetzner.com (project → Limits → Request change)"
+	if !strings.Contains(err.Error(), "quota exceeded(s)") || !strings.HasSuffix(err.Error(), "\n"+hint) {
+		t.Errorf("err = %v", err)
+	}
+
+	fr.Errors = map[string]error{tofuApplyCmd: errors.New("tofu: exit status 1: Error: network unreachable")}
+	if _, err = execVauban(t, context.Background(), "apply", "--dir", root, "--yes"); err == nil || strings.Contains(err.Error(), "looks exhausted") {
+		t.Errorf("hint on a non-quota error: %v", err)
+	}
+}

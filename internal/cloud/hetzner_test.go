@@ -312,3 +312,17 @@ type fakeProviderAs struct {
 }
 
 func (f fakeProviderAs) ID() string { return f.id }
+
+func TestHetznerQuotaNotChecked(t *testing.T) {
+	got, err := (&hetzner{}).Quota(context.Background(), "nbg1", "cx23")
+	if err != nil || !got.OK || !strings.HasPrefix(got.Reason, "not checked") {
+		t.Errorf("Quota = %+v, %v", got, err)
+	}
+}
+
+func TestQuotaHint(t *testing.T) {
+	want := "scaleway: the account quota for STARDUST1-S in fr-par-1 looks exhausted — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"
+	if got := QuotaHint("scaleway", "fr-par-1", "STARDUST1-S"); got != want {
+		t.Errorf("QuotaHint = %q", got)
+	}
+}

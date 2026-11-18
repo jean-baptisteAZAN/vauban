@@ -211,3 +211,10 @@ func (*hetzner) Terraform(in TFInput) ([]byte, error) {
 	}
 	return buf.Bytes(), nil
 }
+
+// Quota is not checked: the Hetzner Cloud API exposes no account or project
+// limits (they are only shown in the console), and a refused server fails
+// tofu apply with resource_limit_exceeded.
+func (*hetzner) Quota(context.Context, string, string) (QuotaStatus, error) {
+	return QuotaStatus{OK: true, Reason: "not checked: the Hetzner Cloud API does not expose project limits"}, nil
+}
