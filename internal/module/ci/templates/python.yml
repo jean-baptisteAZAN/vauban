@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:{{template "pysetup" .}}
+{{- if .UV}}
+      - run: {{if .Ruff}}uv run{{else}}uvx{{end}} ruff check .
+{{- else}}
+      - run: pip install ruff
+      - run: ruff check .
+{{- end}}
+{{- if .Test}}
+
+  test:
+    runs-on: ubuntu-latest
+    steps:{{template "pysetup" .}}
+{{- if .UV}}
+      - run: uv run {{if not .Pytest}}--with pytest {{end}}pytest
+{{- else}}
+      - run: pip install pytest
+      - run: pytest
+{{- end}}
+{{- end}}
+{{template "build"}}
