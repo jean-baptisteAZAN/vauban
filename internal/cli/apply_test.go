@@ -178,6 +178,61 @@ func TestApplyNonTTYWithoutYesExit2(t *testing.T) {
 	}
 }
 
+func TestApplyNoRemoteExit1(t *testing.T) {
+	root, fr := applyEnv(t)
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	writeFile(t, root, ".git/HEAD", "ref: refs/heads/main\n")
+	writeFile(t, root, ".git/refs/heads/main", "0123\n")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	wantExit(t, err, 1, noRemoteMsg, out)
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
+	}
+	if _, err := os.Stat(filepath.Join(root, config.FileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("vauban.yaml written without a remote")
+	}
+}
+
+// The TTY check still comes first, before the remote check and the config.
+func TestApplyNonTTYWithoutYesBeforeRemoteCheck(t *testing.T) {
+	root, _ := applyEnv(t)
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root)
+	wantExit(t, err, 2, errNeedTTY.Error(), out)
+}
+
+func TestApplySavesConfigBeforePlanFails(t *testing.T) {
+	root, _ := applyEnv(t)
+	for _, f := range []string{"go.mod", "main.go"} {
+		_ = os.Remove(filepath.Join(root, f))
+	}
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner", "--port", "9000")
+	if err == nil || !strings.Contains(err.Error(), "unsupported stack") {
+		t.Fatalf("want module plan error, got %v\n%s", err, out)
+	}
+	if c, err := config.Load(root); err != nil || c.AppPort != 9000 {
+		t.Errorf("vauban.yaml not saved before the plan: %+v %v", c, err)
+	}
+}
+
+func TestApplyRefusedCloudChangeNotSaved(t *testing.T) {
+	root, fr := applyEnv(t)
+	t.Cleanup(cloud.Register(&doProvider{}))
+	const existing = "project: shop\ncloud: hetzner\nregion: nbg1\nsize: cx23\napp_port: 8080\n"
+	writeFile(t, root, config.FileName, existing)
+	saveState(t, root, staleState())
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "digitalocean")
+	if err == nil || !strings.Contains(err.Error(), "changing cloud") {
+		t.Fatalf("want cloud change error, got %v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, config.FileName)); string(b) != existing {
+		t.Errorf("vauban.yaml changed:\n%s", b)
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
+	}
+}
+
 func TestApplyDestructiveNotConfirmedExit3(t *testing.T) {
 	root, fr := applyEnv(t)
 	fr.Responses[tofuShowCmd] = []byte(replaceJSON)
@@ -498,5 +553,123 @@ func TestApplyRedeployFooter(t *testing.T) {
 		if !strings.Contains(out, "push to redeploy") || strings.Contains(out, "chore: vauban setup") {
 			t.Errorf("apply %v: want the redeploy hint in:\n%s", args, out)
 		}
+	}
+}
+
+func TestApplyQuotaPreflightExit1(t *testing.T) {
+	root, fr := applyEnv(t)
+	prov := &planProvider{quota: &cloud.QuotaStatus{Reason: planQuotaMsg}}
+	t.Cleanup(cloud.Register(prov))
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	wantExit(t, err, 1, "preflight failed — nothing was applied", out)
+	if !strings.Contains(out, planQuotaMsg) {
+		t.Errorf("missing quota reason in:\n%s", out)
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
+	}
+}
+
+func TestApplyTofuQuotaErrorHint(t *testing.T) {
+	root, fr := applyEnv(t)
+	fr.Errors = map[string]error{tofuApplyCmd: errors.New("tofu: exit status 1: Error: scaleway-sdk-go: quota exceeded(s): cp_servers_type_STARDUST1_S has reached its quota (0/0)")}
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err == nil {
+		t.Fatalf("apply succeeded:\n%s", out)
+	}
+	hint := "hetzner: the account quota for cx23 in nbg1 looks exhausted — pick another size (vauban plan --size …) or request a quota increase at https://console.hetzner.com (project → Limits → Request change)"
+	if !strings.Contains(err.Error(), "quota exceeded(s)") || !strings.HasSuffix(err.Error(), "\n"+hint) {
+		t.Errorf("err = %v", err)
+	}
+
+	fr.Errors = map[string]error{tofuApplyCmd: errors.New("tofu: exit status 1: Error: network unreachable")}
+	if _, err = execVauban(t, context.Background(), "apply", "--dir", root, "--yes"); err == nil || strings.Contains(err.Error(), "looks exhausted") {
+		t.Errorf("hint on a non-quota error: %v", err)
+	}
+}
+
+// The hint is for a refused server (infra:apply), not another step.
+func TestApplyQuotaHintOnlyOnInfraApply(t *testing.T) {
+	root, fr := applyEnv(t)
+	fr.Errors = map[string]error{"tofu -chdir=infra init -input=false": errors.New("tofu: exit status 1: Error: quota exceeded downloading providers")}
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err == nil || !strings.HasPrefix(err.Error(), "infra:init:") || strings.Contains(err.Error(), "looks exhausted") {
+		t.Errorf("err = %v\n%s", err, out)
+	}
+}
+
+// A quota API error warns and never blocks apply.
+func TestApplyQuotaErrorDoesNotBlock(t *testing.T) {
+	root, _ := applyEnv(t)
+	prov := &planProvider{quotaErr: errors.New("hetzner: quota API: 500")}
+	t.Cleanup(cloud.Register(prov))
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warnings:\n  - quota not checked: hetzner: quota API: 500") {
+		t.Errorf("missing warning in:\n%s", out)
+	}
+}
+
+// Resuming an interrupted first apply: resources may exist, so an exhausted
+// quota only warns.
+func TestApplyResumeQuotaWarns(t *testing.T) {
+	for name, prep := range map[string]func(root string){
+		"rendered": func(root string) {
+			writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+			saveState(t, root, &engine.State{
+				Done:    map[string]bool{"infra:main-tf": true},
+				Outputs: engine.Outputs{"rendered_fingerprint": "hetzner/nbg1/cx23"},
+			})
+		},
+		"tfstate": func(root string) {
+			writeFile(t, root, "infra/terraform.tfstate", `{"version":4,"resources":[{"type":"hcloud_ssh_key"}]}`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, _ := applyEnv(t)
+			prov := &planProvider{quota: &cloud.QuotaStatus{Reason: planQuotaMsg}}
+			t.Cleanup(cloud.Register(prov))
+			prep(root)
+			out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+			if err != nil {
+				t.Fatalf("apply blocked on quota while resuming: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, planQuotaMsg+" (not blocking") {
+				t.Errorf("missing quota warning in:\n%s", out)
+			}
+		})
+	}
+}
+
+// Drift of an applied server to a size whose per-type quota is exhausted is
+// blocked (a replacement, not a resume).
+func TestApplyDriftQuotaBlocks(t *testing.T) {
+	root, fr := applyEnv(t)
+	const msg = "hetzner: quota for cx33 in nbg1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.hetzner.com (project → Limits → Request change)"
+	prov := &planProvider{quotaFor: map[string]cloud.QuotaStatus{"cx33": {Reason: msg}}}
+	t.Cleanup(cloud.Register(prov))
+	saveState(t, root, staleState()) // hetzner/nbg1/cx23 applied, rendered_fingerprint set
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+	writeFile(t, root, "infra/terraform.tfstate", `{"version":4,"resources":[{"type":"hcloud_server"}]}`)
+	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\nregion: nbg1\nsize: cx33\napp_port: 8080\n")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes")
+	wantExit(t, err, 1, "preflight failed — nothing was applied", out)
+	if !strings.Contains(out, msg) || strings.Contains(out, "not blocking") {
+		t.Errorf("want blocking quota reason in:\n%s", out)
+	}
+	if !prov.lastReplacing {
+		t.Error("Quota not told it replaces a server")
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
+	}
+
+	// The same size stays fine: only the new type's quota is exhausted.
+	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\nregion: nbg1\nsize: cx23\napp_port: 8080\n")
+	prov.quotaCalls = 0
+	if out, err := execPlan(t, root); err != nil || strings.Contains(out, msg) || prov.quotaCalls != 0 {
+		t.Errorf("no drift: err %v, quota calls %d\n%s", err, prov.quotaCalls, out)
 	}
 }

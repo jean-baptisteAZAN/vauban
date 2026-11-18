@@ -66,15 +66,18 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireRemote(p); err != nil {
+		return err
+	}
 	c, err := resolveConfig(cmd, p)
 	if err != nil {
 		return err
 	}
-	pl, err := preparePlan(root, c, force)
-	if err != nil {
+	if err := saveConfig(root, c); err != nil {
 		return err
 	}
-	if err := c.Save(root); err != nil {
+	pl, err := preparePlan(root, c, force)
+	if err != nil {
 		return err
 	}
 
@@ -86,15 +89,44 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "DNS: point "+c.Domain+" to the server IP (shown after apply)")
 	}
-	if err := engine.Preflight(pl.p, c, pl.mods); err != nil {
-		ui.Warnings(w, "before apply:", strings.Split(err.Error(), "\n"))
+	notices, err := engine.Preflight(pl.p, c, pl.mods, pl.preflightOptions(root, c))
+	var lines []string
+	if err != nil {
+		lines = strings.Split(err.Error(), "\n")
 	}
+	ui.Warnings(w, "before apply:", append(lines, notices.Warnings...))
+	writeNotes(w, notices.Notes)
 	ui.PlanFooter(w)
 	return nil
 }
 
+// saveConfig saves c as soon as it is resolved, before the plan builds, so
+// answers survive a failing plan, but only once infra accepts the cloud: a
+// refused cloud change must never reach vauban.yaml (destroy reads it).
+func saveConfig(root string, c *config.Config) error {
+	st, err := engine.LoadState(root)
+	if err != nil {
+		return err
+	}
+	if err := infra.CheckCloud(root, st, c); err != nil {
+		return err
+	}
+	return c.Save(root)
+}
+
+// writeNotes prints preflight notes (e.g. a quota the cloud cannot report).
+func writeNotes(w io.Writer, notes []string) {
+	if len(notes) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	for _, n := range notes {
+		fmt.Fprintln(w, ui.Hint("note: "+n))
+	}
+}
+
 // resolveConfig returns vauban.yaml, or builds it from flags or prompts. It
-// does not save it: callers do once the plan builds. Explicit flags override
+// does not save it: callers do as soon as it is returned (validated). Explicit flags override
 // values from an existing vauban.yaml; a different --cloud resets region and
 // size to the new provider's defaults unless they are passed too.
 func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error) {
@@ -280,6 +312,33 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 		}
 	}
 	return pl, nil
+}
+
+// preflightOptions says how preflight treats the cloud quota:
+//   - skip when apply creates no server (infra:apply done, or the applied
+//     infra already has this cloud/region/size);
+//   - block, with Replacing, on drift of an applied server (the per-type or
+//     per-zone quota of the new size still matters);
+//   - warn only on a true resume: nothing applied yet but a rendered
+//     fingerprint or a non-empty tfstate, so an interrupted first apply may
+//     have left resources (tofu and the quota hint on its error back it up);
+//   - block otherwise (a first create).
+func (pl *planned) preflightOptions(root string, c *config.Config) engine.PreflightOptions {
+	applied := pl.st.Outputs["infra_fingerprint"]
+	switch {
+	case pl.st.Done["infra:apply"] || applied == infraFingerprint(c):
+		return engine.PreflightOptions{Quota: engine.QuotaSkip, Replacing: applied != ""}
+	case applied != "":
+		return engine.PreflightOptions{Quota: engine.QuotaBlock, Replacing: true}
+	case pl.st.Outputs["rendered_fingerprint"] != "" || nonEmpty(filepath.Join(root, "infra", "terraform.tfstate")):
+		return engine.PreflightOptions{Quota: engine.QuotaWarn}
+	}
+	return engine.PreflightOptions{Quota: engine.QuotaBlock}
+}
+
+func nonEmpty(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Size() > 0
 }
 
 func (pl *planned) steps() []engine.Step {

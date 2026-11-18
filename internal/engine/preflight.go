@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/jean-baptisteAZAN/vauban/internal/cloud"
@@ -17,13 +18,39 @@ import (
 // replace it with a FakeRunner.
 var PreflightRunner Runner = ExecRunner{}
 
-const preflightTimeout = 20 * time.Second
+const (
+	preflightTimeout = 20 * time.Second
+	quotaTimeout     = 10 * time.Second
+)
+
+// QuotaMode says how Preflight treats the cloud quota.
+type QuotaMode int
+
+const (
+	QuotaSkip  QuotaMode = iota // no server will be created: not checked
+	QuotaBlock                  // a new server: an exhausted quota fails preflight
+	QuotaWarn                   // resuming an interrupted first apply: only warn
+)
+
+// PreflightOptions tunes the checks that depend on the infra state.
+type PreflightOptions struct {
+	Quota     QuotaMode
+	Replacing bool // a server is applied: the change resizes or replaces it
+}
+
+// Notices are preflight findings that never block apply: Warnings (e.g. a
+// quota that could not be checked) and Notes (e.g. a cloud with no quota API).
+type Notices struct{ Warnings, Notes []string }
 
 // Preflight checks, before any step runs, everything the selected modules
 // need: a valid config, and for deploy a GitHub remote and an authenticated
 // gh, for infra tofu, ssh-keygen and working cloud credentials. It returns
 // one error listing every problem, or nil. Messages never include secrets.
-func Preflight(p *detect.Project, c *config.Config, mods []Module) error {
+// Unless opts.Quota is QuotaSkip, it also asks the cloud whether the account
+// quota allows the server: only an exhausted quota in QuotaBlock mode is an
+// error; a quota that could not be checked is a warning, never a block.
+func Preflight(p *detect.Project, c *config.Config, mods []Module, opts PreflightOptions) (Notices, error) {
+	var notices Notices
 	selected := make(map[string]bool, len(mods))
 	for _, m := range mods {
 		selected[m.ID()] = true
@@ -58,8 +85,36 @@ func Preflight(p *detect.Project, c *config.Config, mods []Module) error {
 				errs = append(errs, err)
 			} else if err := prov.CheckAuth(ctx); err != nil {
 				errs = append(errs, err)
+			} else if opts.Quota != QuotaSkip {
+				if err := checkQuota(prov, c, opts, &notices); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
 	}
-	return errors.Join(errs...)
+	return notices, errors.Join(errs...)
+}
+
+// checkQuota asks prov for the quota of c's region and size, with its own
+// timeout. It returns an error only for an exhausted quota in QuotaBlock
+// mode; everything else lands in notices.
+func checkQuota(prov cloud.Provider, c *config.Config, opts PreflightOptions, notices *Notices) error {
+	ctx, cancel := context.WithTimeout(context.Background(), quotaTimeout)
+	defer cancel()
+	q, err := prov.Quota(ctx, c.Region, c.Size, opts.Replacing)
+	switch {
+	case err != nil:
+		notices.Warnings = append(notices.Warnings, "quota not checked: "+err.Error())
+	case !q.OK && opts.Quota == QuotaBlock:
+		return errors.New(q.Reason)
+	case !q.OK:
+		notices.Warnings = append(notices.Warnings, q.Reason+" (not blocking: resuming an interrupted first apply, which may already have created resources)")
+	case q.Reason != "":
+		if why, ok := strings.CutPrefix(q.Reason, "not checked: "); ok {
+			notices.Notes = append(notices.Notes, prov.ID()+" quota not checked ("+why+")")
+		} else {
+			notices.Notes = append(notices.Notes, prov.ID()+" quota: "+q.Reason)
+		}
+	}
+	return nil
 }

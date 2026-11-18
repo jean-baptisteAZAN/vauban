@@ -85,7 +85,9 @@ vauban apply    # confirm, then write files, create the VM, push GitHub secrets
 git add -A && git commit -m "ship it" && git push   # vauban never pushes for you
 ```
 
-`plan` saves your answers to `vauban.yaml` (commit it). After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` to `apply` (and `--cloud` if there is no `vauban.yaml`). Anything that destroys or replaces cloud resources needs the project name typed in a terminal, or `--confirm <project>` (`apply` and `destroy`).
+vauban deploys from GitHub Actions, so `plan` and `apply` first check for a GitHub `origin` remote and stop (exit 1) before asking anything if there is none, printing the `gh repo create <name> --private --source . --push` command to create one, preceded, when the repo has no commit yet, by the first commit it needs (`git add -A && git commit -m "init"`; check that `.gitignore` covers `.env` and secrets first). `doctor` suggests the same commands as its next step.
+
+`plan` and `apply` save your answers to `vauban.yaml` (commit it) as soon as they are complete and valid, so they are kept even if the plan then fails. A cloud change refused because servers are applied is never saved, and `destroy` always uses the cloud the infra was applied on. After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` to `apply` (and `--cloud` if there is no `vauban.yaml`). Anything that destroys or replaces cloud resources needs the project name typed in a terminal, or `--confirm <project>` (`apply` and `destroy`).
 
 Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--domain`, `--port`, `--reconfigure`, `--force` (overwrite generated files only), `--confirm <project>`, `--dir <path>`. Every command has `--help`.
 
@@ -93,7 +95,7 @@ Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--
 
 1. **`doctor`** scans the repo on disk (no network): stack, what exists, what is missing, which tools are installed.
 2. **`plan`** asks for cloud, region, size, domain and port (regions and sizes come from the cloud's API), saves `vauban.yaml`, and prints every file and command `apply` would run. Nothing else changes.
-3. **`apply`** checks everything up front (GitHub remote, `gh` login, `tofu`, `ssh-keygen`, cloud credentials), asks for confirmation, then writes the files, generates the deploy key, runs `tofu init/plan/apply`, reads the server IP from `tofu output` and sets the GitHub secrets.
+3. **`apply`** checks everything up front (GitHub remote, `gh` login, `tofu`, `ssh-keygen`, cloud credentials, the account quota for a new server), asks for confirmation, then writes the files, generates the deploy key, runs `tofu init/plan/apply`, reads the server IP from `tofu output` and sets the GitHub secrets.
 
 After that, vauban is out of the loop: your next `git push` does the rest.
 
@@ -137,6 +139,20 @@ Stacks: **Go**, **Node/TypeScript**, **Python**. Your app must listen on `0.0.0.
 
 Node: the `start` script must not call pnpm, yarn or bun: the image runs `npm start`.
 
+### Quotas
+
+A size the cloud lists as available can still be refused by your account's quota. vauban checks before it creates a server:
+
+| Cloud | What is checked |
+|---|---|
+| Scaleway | The organization's per-type quota (`cp_servers_type_<TYPE>` per zone, IAM `GET /iam/v1alpha1/quota`) against the servers of that type in the zone (Instance dashboard). The size picker leaves out types whose quota is 0. Reading quotas needs an API key allowed to read the organization's quotas; without that permission (or without `SCW_DEFAULT_ORGANIZATION_ID` / a readable project), quotas are not checked. |
+| DigitalOcean | The account `droplet_limit` (`GET /v2/account`) against the number of droplets. Resizing or replacing an applied droplet adds none, so it is only refused when the account is already over the limit. |
+| Hetzner | Not checked: the Hetzner Cloud API does not expose project limits. |
+
+When a new server would be created, `apply`'s preflight fails before any step if the quota is exhausted, e.g. `scaleway: quota for STARDUST1-S in fr-par-1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas`; `plan` shows the same under `before apply:`. If `tofu apply` is still refused for a quota or limit, the error ends with the same advice.
+
+Quota uncertainty never blocks: when the quota API fails (server error, rate limit, timeout; each check has its own 10 s limit), `plan` and `apply` warn `quota not checked: …` and go on; a cloud that cannot report quotas (Hetzner, or a Scaleway key without quota access) gets a `note:` line. When resuming an interrupted first apply (resources may already exist), an exhausted quota is a warning, not a failure; tofu remains the backstop.
+
 GitHub access comes from `gh auth login`. vauban stores no credentials itself.
 
 > [!TIP]
@@ -162,7 +178,7 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Failure, including a failed preflight (nothing was applied) |
+| 1 | Failure, including no GitHub remote or a failed preflight (nothing was applied) |
 | 2 | Usage problem: `apply` without a terminal and without `--yes`, or with a mismatched `--confirm`; `destroy` without a terminal and without `--confirm <project>` (or a mismatched name); `plan` with no `vauban.yaml` and no `--cloud` outside a terminal |
 | 3 | Destructive infra change not confirmed (nothing was applied): rerun and type the project name, or pass `--confirm <project>` |
 | 130 | Interrupted (Ctrl-C); state is kept, rerun to resume |

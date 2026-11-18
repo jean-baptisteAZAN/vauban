@@ -20,8 +20,15 @@ import (
 
 const planToken = "hcloud-plan-secret"
 
-// planProvider stands in for hetzner without network access.
-type planProvider struct{}
+// planProvider stands in for hetzner without network access. quota, when
+// set, is what Quota returns; quotaCalls counts the calls.
+type planProvider struct {
+	quota         *cloud.QuotaStatus
+	quotaErr      error
+	quotaFor      map[string]cloud.QuotaStatus // per size, over quota
+	quotaCalls    int
+	lastReplacing bool
+}
 
 func (*planProvider) ID() string            { return "hetzner" }
 func (*planProvider) DefaultRegion() string { return "nbg1" }
@@ -35,6 +42,20 @@ func (*planProvider) Regions(context.Context) ([]cloud.Option, error) {
 }
 func (*planProvider) Sizes(context.Context, string) ([]cloud.Option, error) {
 	return []cloud.Option{{ID: "cx23", Label: "cx23"}}, nil
+}
+func (p *planProvider) Quota(_ context.Context, _, size string, replacing bool) (cloud.QuotaStatus, error) {
+	p.quotaCalls++
+	p.lastReplacing = replacing
+	if p.quotaErr != nil {
+		return cloud.QuotaStatus{}, p.quotaErr
+	}
+	if q, ok := p.quotaFor[size]; ok {
+		return q, nil
+	}
+	if p.quota != nil {
+		return *p.quota, nil
+	}
+	return cloud.QuotaStatus{OK: true}, nil
 }
 func (*planProvider) Terraform(in cloud.TFInput) ([]byte, error) {
 	return []byte("# tf " + in.Region + "\n"), nil
@@ -440,17 +461,83 @@ func TestPlanCloudChangeResetsRegionAndSize(t *testing.T) {
 	}
 }
 
-func TestPlanDoesNotSaveConfigWhenPlanFails(t *testing.T) {
+const noRemoteMsg = "no GitHub remote: vauban deploys from GitHub Actions.\n" +
+	"  create one:  gh repo create shop --private --source . --push\n" +
+	"  or link one: git remote add origin git@github.com:<owner>/<repo>.git"
+
+// Without a GitHub remote, plan stops before resolving or asking the config.
+func TestPlanNoRemoteFailsBeforeAsking(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	writeFile(t, root, ".git/HEAD", "ref: refs/heads/main\n")
+	writeFile(t, root, ".git/refs/heads/main", "0123\n")
+	asked := false
+	oldTTY := interactive
+	interactive = func() bool { asked = true; return false }
+	t.Cleanup(func() { interactive = oldTTY })
+
+	out, err := execPlan(t, root)
+	wantExit(t, err, 1, noRemoteMsg, out)
+	if asked {
+		t.Error("config resolved before the remote check")
+	}
+	if _, err := os.Stat(filepath.Join(root, config.FileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("vauban.yaml written without a remote")
+	}
+}
+
+func TestPlanNoRemoteNoCommits(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	writeFile(t, root, ".git/HEAD", "ref: refs/heads/main\n")
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	wantExit(t, err, 1, "no GitHub remote: vauban deploys from GitHub Actions.\n"+
+		"  commit your code first (check .gitignore covers .env and secrets): git add -A && git commit -m \"init\"\n"+
+		"  create one:  gh repo create shop --private --source . --push\n"+
+		"  or link one: git remote add origin git@github.com:<owner>/<repo>.git", out)
+}
+
+func TestPlanNoRemoteNotARepo(t *testing.T) {
 	root, _ := planEnv(t, "go-app")
 	if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
 		t.Fatal(err)
 	}
 	out, err := execPlan(t, root, "--cloud", "hetzner")
-	if err == nil || !strings.Contains(err.Error(), "GitHub remote") {
-		t.Fatalf("want deploy remote error, got %v\n%s", err, out)
+	wantExit(t, err, 1, "", out)
+	if !strings.Contains(err.Error(), "  commit your code first (check .gitignore covers .env and secrets): git init && git add -A && git commit -m \"init\"\n") {
+		t.Errorf("unexpected message:\n%s", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, config.FileName)); !errors.Is(err, fs.ErrNotExist) {
-		t.Error("vauban.yaml saved although the plan failed")
+}
+
+// Answers are saved once validated, even when a module plan then fails.
+func TestPlanSavesConfigBeforePlanFails(t *testing.T) {
+	root, _ := planEnv(t, "empty") // no stack: the container module refuses it
+	out, err := execPlan(t, root, "--cloud", "hetzner", "--port", "9000")
+	if err == nil || !strings.Contains(err.Error(), "unsupported stack") {
+		t.Fatalf("want module plan error, got %v\n%s", err, out)
+	}
+	c, err := config.Load(root)
+	if err != nil {
+		t.Fatalf("vauban.yaml not saved: %v", err)
+	}
+	if c.Cloud != "hetzner" || c.AppPort != 9000 {
+		t.Errorf("saved config %+v", c)
+	}
+}
+
+// A cloud change refused while servers are applied never reaches vauban.yaml.
+func TestPlanRefusedCloudChangeNotSaved(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	t.Cleanup(cloud.Register(&doProvider{}))
+	const existing = "project: shop\ncloud: hetzner\nregion: nbg1\nsize: cx23\napp_port: 8080\n"
+	writeFile(t, root, config.FileName, existing)
+	saveState(t, root, staleState()) // hetzner applied
+	out, err := execPlan(t, root, "--cloud", "digitalocean")
+	if err == nil || !strings.Contains(err.Error(), "changing cloud (hetzner → digitalocean) is not supported") {
+		t.Fatalf("want cloud change error, got %v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, config.FileName)); string(b) != existing {
+		t.Errorf("vauban.yaml changed:\n%s", b)
 	}
 }
 
@@ -590,5 +677,75 @@ func TestPlanDeployKeyExists(t *testing.T) {
 	}
 	if strings.Contains(out, "PRIVATE KEY") {
 		t.Errorf("key material in output:\n%s", out)
+	}
+}
+
+const planQuotaMsg = "hetzner: quota for cx23 in nbg1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.hetzner.com (project → Limits → Request change)"
+
+func TestPlanQuotaWarning(t *testing.T) {
+	root, prov := planEnv(t, "go-app")
+	prov.quota = &cloud.QuotaStatus{Reason: planQuotaMsg}
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan must not fail on quota: %v\n%s", err, out)
+	}
+	i := strings.Index(out, "before apply:")
+	if i < 0 || !strings.Contains(out[i:], planQuotaMsg) {
+		t.Errorf("missing quota warning in:\n%s", out)
+	}
+}
+
+// An applied server of the same cloud/region/size needs no quota check.
+func TestPlanNoQuotaCheckWhenApplied(t *testing.T) {
+	root, prov := planEnv(t, "go-app")
+	st := staleState()
+	st.Outputs["deployed_ip"] = "203.0.113.9"
+	st.Outputs["deployed_domain"] = "203-0-113-9.sslip.io"
+	saveState(t, root, st)
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+	prov.quota = &cloud.QuotaStatus{Reason: planQuotaMsg}
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if prov.quotaCalls != 0 || strings.Contains(out, planQuotaMsg) {
+		t.Errorf("quota checked for an applied server (%d calls):\n%s", prov.quotaCalls, out)
+	}
+}
+
+func TestPlanQuotaErrorIsWarning(t *testing.T) {
+	root, prov := planEnv(t, "go-app")
+	prov.quotaErr = errors.New("scaleway: list quotas: 500 internal error")
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	i := strings.Index(out, "before apply:")
+	if i < 0 || !strings.Contains(out[i:], "quota not checked: scaleway: list quotas: 500 internal error") {
+		t.Errorf("missing quota warning in:\n%s", out)
+	}
+}
+
+func TestPlanQuotaNotCheckedNote(t *testing.T) {
+	root, prov := planEnv(t, "go-app")
+	prov.quota = &cloud.QuotaStatus{OK: true, Reason: "not checked: API has no limits"}
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "note: hetzner quota not checked (API has no limits)\n") || strings.Contains(out, "before apply:") {
+		t.Errorf("want a note and no warning in:\n%s", out)
+	}
+}
+
+// A region change of an applied server is a replacement: Quota is told so.
+func TestPlanQuotaReplacing(t *testing.T) {
+	root, prov := planEnv(t, "go-app")
+	saveState(t, root, staleState()) // hetzner/nbg1/cx23 applied
+	if out, err := execPlan(t, root, "--cloud", "hetzner", "--region", "fsn1"); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if prov.quotaCalls != 1 || !prov.lastReplacing {
+		t.Errorf("quota calls %d, replacing %v", prov.quotaCalls, prov.lastReplacing)
 	}
 }

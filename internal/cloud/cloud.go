@@ -34,10 +34,46 @@ type Provider interface {
 	CredentialsEnv() ([]string, error)
 	CheckAuth(ctx context.Context) error // cheap authenticated API call
 	Regions(ctx context.Context) ([]Option, error)
+	// Sizes lists the sizes orderable in region. Providers that can read
+	// per-type quotas leave out the sizes the account cannot create.
 	Sizes(ctx context.Context, region string) ([]Option, error)
+	// Quota reports whether the account may create one more server of size
+	// in region. replacing means a server is already applied, so the change
+	// resizes or replaces it rather than adding one. Quotas that cannot be
+	// read are OK with a "not checked: …" reason; errors are for failed API
+	// calls.
+	Quota(ctx context.Context, region, size string, replacing bool) (QuotaStatus, error)
 	// Terraform renders the provider block, ssh key(s), server and firewall,
 	// with outputs server_ip and server_ipv6.
 	Terraform(in TFInput) ([]byte, error)
+}
+
+// QuotaStatus is the result of a quota check. Reason is human-readable,
+// never contains secrets, and says why when OK is false (or what was not
+// checked when OK is true).
+type QuotaStatus struct {
+	OK     bool
+	Reason string
+}
+
+var quotaURLs = map[string]string{
+	"scaleway":     "https://console.scaleway.com/organization/quotas",
+	"digitalocean": "https://cloud.digitalocean.com/account/team (Droplet limit → Increase)",
+	"hetzner":      "https://console.hetzner.com (project → Limits → Request change)",
+}
+
+// QuotaURL is where quota or limit increases are requested for cloud id.
+func QuotaURL(id string) string { return quotaURLs[id] }
+
+// quotaFix is the advice that ends a quota message for a server size.
+func quotaFix(id string) string {
+	return "pick another size (vauban plan --size …) or request a quota increase at " + QuotaURL(id)
+}
+
+// QuotaHint is the advice printed when the cloud refused a server for quota
+// reasons (e.g. tofu apply failing with "quota exceeded").
+func QuotaHint(id, region, size string) string {
+	return fmt.Sprintf("%s: the account quota for %s in %s looks exhausted — %s", id, size, region, quotaFix(id))
 }
 
 //go:embed tf/*

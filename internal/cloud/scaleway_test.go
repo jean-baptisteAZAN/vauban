@@ -233,9 +233,12 @@ func TestScalewayBadKeyFormatNoLeak(t *testing.T) {
 }
 
 // fakeSCWAPI serves canned Scaleway API responses and requires the secret key.
-func fakeSCWAPI(t *testing.T) *scaleway {
+func fakeSCWAPI(t *testing.T, extra ...func(*http.ServeMux)) *scaleway {
 	t.Helper()
 	mux := http.NewServeMux()
+	for _, f := range extra {
+		f(mux)
+	}
 	mux.HandleFunc("/instance/v1/zones/fr-par-1/servers", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"servers":[]}`))
 	})
@@ -392,5 +395,131 @@ func TestScalewayConfigPermissiveWarnsOnStderrOnly(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), testSCWSecret) {
 		t.Error("secret in warning")
+	}
+}
+
+const testSCWOrg = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+// scwQuotas serves the account project (for its organization), IAM quotas
+// (two pages) and the zone dashboard.
+func scwQuotas(t *testing.T, quotaStatus int) func(*http.ServeMux) {
+	return func(mux *http.ServeMux) {
+		mux.HandleFunc("/account/v3/projects/"+testSCWProject, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"id":"` + testSCWProject + `","organization_id":"` + testSCWOrg + `"}`))
+		})
+		mux.HandleFunc("/iam/v1alpha1/quota", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("organization_id") != testSCWOrg {
+				t.Errorf("quota organization_id = %q", r.URL.Query().Get("organization_id"))
+			}
+			if quotaStatus != http.StatusOK {
+				w.WriteHeader(quotaStatus)
+				if quotaStatus == http.StatusForbidden {
+					_, _ = w.Write([]byte(`{"type":"permissions_denied","message":"insufficient permissions","details":[{"resource":"quota","action":"read"}]}`))
+				} else {
+					_, _ = w.Write([]byte(`{"message":"internal error"}`))
+				}
+				return
+			}
+			if r.URL.Query().Get("page") == "2" {
+				_, _ = w.Write([]byte(`{"total_count":5,"quota":[
+					{"name":"cp_servers_type_PRO2_XXS","limits":[{"global":true,"limit":0},{"zone":"fr-par-1","unlimited":true}]},
+					{"name":"cp_servers_type_GP1_XS","limits":[{"global":true,"limit":0},{"zone":"nl-ams-1","limit":5}]},
+					{"name":"cp_servers_type_STARDUST1_S","limits":[{"zone":"fr-par-1","limit":0},{"zone":"nl-ams-1","limit":1}]}
+				]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"total_count":5,"quota":[
+				{"name":"cp_servers_type_PLAY2_NANO","limits":[{"zone":"fr-par-1","limit":0}]},
+				{"name":"cp_servers_type_PLAY2_PICO","limits":[{"zone":"fr-par-1","limit":1},{"zone":"fr-par-2","limit":0}]},
+				{"name":"instances_ip","limits":[{"zone":"fr-par-1","limit":10}]}
+			]}`))
+		})
+		mux.HandleFunc("/instance/v1/zones/fr-par-1/dashboard", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"dashboard":{"servers_count":1,"servers_by_types":{"PLAY2-PICO":1}}}`))
+		})
+	}
+}
+
+func TestScalewaySizesLeavesOutQuotaZero(t *testing.T) {
+	got, err := fakeSCWAPI(t, scwQuotas(t, http.StatusOK)).Sizes(context.Background(), "fr-par-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Option{
+		{ID: "PLAY2-PICO", Label: "PLAY2-PICO · 1 vCPU · 2 GB · €3.96/mo"},
+		{ID: "PRO2-XXS", Label: "PRO2-XXS · 2 vCPU · 8 GB · €12.26/mo"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Sizes = %#v", got)
+	}
+}
+
+func TestScalewaySizesAllQuotaZero(t *testing.T) {
+	s := fakeSCWAPI(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/iam/v1alpha1/quota", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"total_count":3,"quota":[
+				{"name":"cp_servers_type_PLAY2_NANO","limits":[{"zone":"fr-par-1","limit":0}]},
+				{"name":"cp_servers_type_PLAY2_PICO","limits":[{"zone":"fr-par-1","limit":0}]},
+				{"name":"cp_servers_type_PRO2_XXS","limits":[{"zone":"fr-par-1","limit":0}]}
+			]}`))
+		})
+	})
+	t.Setenv("SCW_DEFAULT_ORGANIZATION_ID", testSCWOrg)
+	_, err := s.Sizes(context.Background(), "fr-par-1")
+	if err == nil || len(err.Error()) > 120 || !strings.Contains(err.Error(), "quota 0 for every type in fr-par-1") ||
+		!strings.Contains(err.Error(), "https://console.scaleway.com/organization/quotas") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Without permission to read quotas, sizes are not filtered.
+func TestScalewaySizesQuotaUnreadable(t *testing.T) {
+	got, err := fakeSCWAPI(t, scwQuotas(t, http.StatusForbidden)).Sizes(context.Background(), "fr-par-1")
+	if err != nil || len(got) != 3 {
+		t.Fatalf("Sizes = %v, %v", got, err)
+	}
+}
+
+func TestScalewayQuota(t *testing.T) {
+	s := fakeSCWAPI(t, scwQuotas(t, http.StatusOK))
+	for _, tc := range []struct {
+		size   string
+		ok     bool
+		reason string
+	}{
+		{"STARDUST1-S", false, "scaleway: quota for STARDUST1-S in fr-par-1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"},
+		{"PLAY2-PICO", false, "scaleway: quota for PLAY2-PICO in fr-par-1 is 1 and 1 in use — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"},
+		{"PRO2-XXS", true, ""}, // zone unlimited wins over global 0
+		{"GP1-XS", false, "scaleway: quota for GP1-XS in fr-par-1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.scaleway.com/organization/quotas"}, // global, no zone entry
+		{"DEV1-S", true, ""}, // no quota listed
+	} {
+		got, err := s.Quota(context.Background(), "fr-par-1", tc.size, false)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.size, err)
+		}
+		if got.OK != tc.ok || (tc.reason != "" && got.Reason != tc.reason) {
+			t.Errorf("%s: Quota = %+v", tc.size, got)
+		}
+		if strings.Contains(got.Reason, testSCWSecret) {
+			t.Errorf("secret leaked: %q", got.Reason)
+		}
+	}
+}
+
+func TestScalewayQuotaUnreadable(t *testing.T) {
+	got, err := fakeSCWAPI(t, scwQuotas(t, http.StatusForbidden)).Quota(context.Background(), "fr-par-1", "STARDUST1-S", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK || !strings.HasPrefix(got.Reason, "not checked") {
+		t.Errorf("Quota = %+v", got)
+	}
+}
+
+// A server error is returned as an error, for the caller to warn about.
+func TestScalewayQuotaServerError(t *testing.T) {
+	s := fakeSCWAPI(t, scwQuotas(t, http.StatusInternalServerError))
+	if _, err := s.Quota(context.Background(), "fr-par-1", "STARDUST1-S", false); err == nil {
+		t.Fatal("want error on 500")
 	}
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -27,7 +28,7 @@ func doctorOutArgs(t *testing.T, args ...string) string {
 
 func TestDoctorEmpty(t *testing.T) {
 	got := doctorOut(t, "../../testdata/empty")
-	for _, want := range []string{"vauban · ", "stack     unknown", "github    none", "next      vauban plan"} {
+	for _, want := range []string{"vauban · ", "stack     unknown", "github    none", "next      commit first (git init && git add -A && git commit -m \"init\"), then gh repo create empty --private --source . --push"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
@@ -52,7 +53,12 @@ func TestDoctorDockerized(t *testing.T) {
 }
 
 func TestDoctorSubcommand(t *testing.T) {
-	got := doctorOutArgs(t, "doctor", "--dir", "../../testdata/go-app")
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS("../../testdata/go-app")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, ".git/config", "[remote \"origin\"]\n\turl = git@github.com:acme/shop.git\n")
+	got := doctorOutArgs(t, "doctor", "--dir", dir)
 	if !strings.Contains(got, "stack     go (go ") || !strings.Contains(got, "next      vauban plan") {
 		t.Errorf("unexpected doctor report:\n%s", got)
 	}

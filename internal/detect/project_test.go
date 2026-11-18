@@ -164,3 +164,31 @@ func TestLangVersionRangesUseDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestHasCommits(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"no git", nil, false},
+		{"fresh init", map[string]string{".git/HEAD": "ref: refs/heads/main\n"}, false},
+		{"loose ref", map[string]string{".git/HEAD": "ref: refs/heads/main\n", ".git/refs/heads/main": "abc\n"}, true},
+		{"packed ref", map[string]string{".git/HEAD": "ref: refs/heads/main\n", ".git/packed-refs": "# pack-refs\nabc refs/heads/main\n"}, true},
+		{"detached", map[string]string{".git/HEAD": "0123456789abcdef\n"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, content := range tc.files {
+				writeTemp(t, dir, name, content)
+			}
+			p, err := Scan(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.HasCommits != tc.want {
+				t.Errorf("HasCommits = %v, want %v", p.HasCommits, tc.want)
+			}
+		})
+	}
+}

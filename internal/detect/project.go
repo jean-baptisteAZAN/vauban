@@ -28,6 +28,7 @@ type Project struct {
 	HasLintConfig  bool
 	HasTests       bool
 	IsGitRepo      bool
+	HasCommits     bool // HEAD resolves to a commit (filesystem check only)
 	GitHubRepo     string
 }
 

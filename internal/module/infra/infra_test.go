@@ -47,6 +47,9 @@ func (*fakeProvider) Regions(context.Context) ([]cloud.Option, error) {
 func (*fakeProvider) Sizes(context.Context, string) ([]cloud.Option, error) {
 	return nil, nil
 }
+func (*fakeProvider) Quota(context.Context, string, string, bool) (cloud.QuotaStatus, error) {
+	return cloud.QuotaStatus{OK: true}, nil
+}
 func (f *fakeProvider) Terraform(in cloud.TFInput) ([]byte, error) {
 	if f.got != nil {
 		*f.got = in
@@ -922,5 +925,25 @@ func TestCloudChangeRefusedFromDisk(t *testing.T) {
 	want := "changing cloud (digitalocean → hetzner) is not supported in place: run vauban destroy first, then vauban apply"
 	if err == nil || err.Error() != want {
 		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+// An interrupted first apply (rendered, never applied) on another cloud may
+// have left resources: the change is refused, from the state or main.tf.
+func TestCloudChangeRefusedAfterInterruptedApply(t *testing.T) {
+	_, _, root := setup(t)
+	st := &engine.State{Done: map[string]bool{"infra:main-tf": true}, Outputs: engine.Outputs{"rendered_fingerprint": "hetzner/nbg1/cx23"}}
+	if err := st.Save(root); err != nil {
+		t.Fatal(err)
+	}
+	writeMainTF(t, root, "# managed by vauban\n# fingerprint: digitalocean/fra1/s-1vcpu-1gb\nterraform {}\n")
+	err := CheckCloud(root, st, cfg())
+	want := "changing cloud (digitalocean → hetzner) is not supported in place: run vauban destroy first, then vauban apply"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	// Without any state (after destroy), the kept main.tf does not block.
+	if err := CheckCloud(root, &engine.State{Done: map[string]bool{}, Outputs: engine.Outputs{}}, cfg()); err != nil {
+		t.Errorf("after destroy: %v", err)
 	}
 }

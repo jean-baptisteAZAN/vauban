@@ -15,6 +15,8 @@ import (
 	"strings"
 	"text/template"
 
+	account "github.com/scaleway/scaleway-sdk-go/api/account/v3"
+	iam "github.com/scaleway/scaleway-sdk-go/api/iam/v1alpha1"
 	"github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 	"gopkg.in/yaml.v3"
@@ -48,7 +50,7 @@ func (*scaleway) DefaultSize() string   { return scalewaySize }
 
 var errNoScalewayCreds = errors.New(`scaleway: no API credentials found: set SCW_ACCESS_KEY, SCW_SECRET_KEY and SCW_DEFAULT_PROJECT_ID or run "scw init"`)
 
-type scalewayCreds struct{ access, secret, project, zone string }
+type scalewayCreds struct{ access, secret, project, zone, org string }
 
 // scalewayCredentials reads SCW_ACCESS_KEY, SCW_SECRET_KEY and
 // SCW_DEFAULT_PROJECT_ID (and SCW_DEFAULT_ZONE), filling whatever is missing
@@ -60,6 +62,7 @@ func scalewayCredentials() (scalewayCreds, error) {
 		secret:  os.Getenv("SCW_SECRET_KEY"),
 		project: os.Getenv("SCW_DEFAULT_PROJECT_ID"),
 		zone:    os.Getenv("SCW_DEFAULT_ZONE"),
+		org:     os.Getenv("SCW_DEFAULT_ORGANIZATION_ID"),
 	}
 	if c.access == "" || c.secret == "" || c.project == "" {
 		prof, err := loadScalewayProfile()
@@ -70,6 +73,7 @@ func scalewayCredentials() (scalewayCreds, error) {
 		c.secret = cmp.Or(c.secret, prof.SecretKey)
 		c.project = cmp.Or(c.project, prof.DefaultProjectID)
 		c.zone = cmp.Or(c.zone, prof.DefaultZone)
+		c.org = cmp.Or(c.org, prof.DefaultOrganizationID)
 	}
 	var missing []string
 	for _, m := range []struct{ name, val string }{
@@ -96,6 +100,8 @@ type scalewayProfile struct {
 	SecretKey        string `yaml:"secret_key"`
 	DefaultProjectID string `yaml:"default_project_id"`
 	DefaultZone      string `yaml:"default_zone"`
+	// DefaultOrganizationID is optional: quotas fall back to the project's.
+	DefaultOrganizationID string `yaml:"default_organization_id"`
 }
 
 // loadScalewayProfile reads the active profile of the scw config file. It
@@ -141,6 +147,7 @@ func loadScalewayProfile() (scalewayProfile, error) {
 		prof.SecretKey = cmp.Or(p.SecretKey, prof.SecretKey)
 		prof.DefaultProjectID = cmp.Or(p.DefaultProjectID, prof.DefaultProjectID)
 		prof.DefaultZone = cmp.Or(p.DefaultZone, prof.DefaultZone)
+		prof.DefaultOrganizationID = cmp.Or(p.DefaultOrganizationID, prof.DefaultOrganizationID)
 	}
 	return prof, nil
 }
@@ -210,7 +217,8 @@ func (*scaleway) Regions(context.Context) ([]Option, error) {
 }
 
 // Sizes lists x86 instance types orderable in zone (not in shortage, not end
-// of service), cheapest first.
+// of service, and, when the key can read quotas, a quota above 0), cheapest
+// first.
 func (s *scaleway) Sizes(ctx context.Context, zone string) ([]Option, error) {
 	z, err := scw.ParseZone(zone)
 	if err != nil {
@@ -221,6 +229,7 @@ func (s *scaleway) Sizes(ctx context.Context, zone string) ([]Option, error) {
 		return nil, err
 	}
 	api := instance.NewAPI(c)
+	quotas, qerr := s.typeQuotas(ctx, c, z) // unreadable quotas filter nothing
 	avail, err := api.GetServerTypesAvailability(&instance.GetServerTypesAvailabilityRequest{Zone: z}, scw.WithContext(ctx), scw.WithAllPages())
 	if err != nil {
 		return nil, fmt.Errorf("scaleway: list instance availability: %w", err)
@@ -235,10 +244,15 @@ func (s *scaleway) Sizes(ctx context.Context, zone string) ([]Option, error) {
 		month float64
 	}
 	var rows []row
+	zeroQuota := 0
 	for id, t := range types.Servers {
 		a, ok := avail.Servers[id]
 		if t == nil || !ok || a == nil || a.Availability == instance.ServerTypesAvailabilityShortage ||
 			t.EndOfService || t.Arch != instance.ArchX86_64 || (t.Gpu != nil && *t.Gpu > 0) {
+			continue
+		}
+		if limit, ok := quotas[id]; qerr == nil && ok && limit == 0 {
+			zeroQuota++
 			continue
 		}
 		month := float64(t.HourlyPrice) * scalewayHoursPerMonth
@@ -246,6 +260,10 @@ func (s *scaleway) Sizes(ctx context.Context, zone string) ([]Option, error) {
 			month = float64(*t.MonthlyPrice)
 		}
 		rows = append(rows, row{id, t, month})
+	}
+	if len(rows) == 0 && zeroQuota > 0 {
+		// kept short: the size form shows the first 120 characters
+		return nil, fmt.Errorf("scaleway: quota 0 for every type in %s; raise it at %s", zone, QuotaURL("scaleway"))
 	}
 	slices.SortFunc(rows, func(a, b row) int {
 		return cmp.Or(cmp.Compare(a.month, b.month), cmp.Compare(a.t.Ncpus, b.t.Ncpus),
@@ -260,6 +278,125 @@ func (s *scaleway) Sizes(ctx context.Context, zone string) ([]Option, error) {
 		out = append(out, Option{ID: r.id, Label: label})
 	}
 	return out, nil
+}
+
+// scalewayQuotaPrefix names an instance type's quota: STARDUST1-S is
+// limited by cp_servers_type_STARDUST1_S, per zone (the name the Instance
+// API quotes when it refuses a server, and that IAM ListQuota returns).
+const scalewayQuotaPrefix = "cp_servers_type_"
+
+// errQuotaUnreadable means the quotas could not be read with this key
+// (missing permission, unknown organization): nothing is filtered or failed.
+var errQuotaUnreadable = errors.New("cannot read the organization quotas with this API key")
+
+// typeQuotas returns the instance type quota limits of the organization in
+// zone, by type ("STARDUST1-S" → 0). Types without a limit (unlimited or not
+// listed) are absent. It reads IAM ListQuota (GET /iam/v1alpha1/quota),
+// finding the organization from SCW_DEFAULT_ORGANIZATION_ID, the scw profile,
+// or the project (GET /account/v3/projects/{id}).
+func (s *scaleway) typeQuotas(ctx context.Context, c *scw.Client, zone scw.Zone) (map[string]uint64, error) {
+	creds, err := scalewayCredentials()
+	if err != nil {
+		return nil, err
+	}
+	org := creds.org
+	if org == "" {
+		proj, err := account.NewProjectAPI(c).GetProject(&account.ProjectAPIGetProjectRequest{ProjectID: creds.project}, scw.WithContext(ctx))
+		if err != nil {
+			return nil, scalewayQuotaErr("read project", err)
+		}
+		org = proj.OrganizationID
+	}
+	if org == "" {
+		return nil, errQuotaUnreadable
+	}
+	resp, err := iam.NewAPI(c).ListQuota(&iam.ListQuotaRequest{OrganizationID: org, PageSize: scw.Uint32Ptr(100)}, scw.WithContext(ctx), scw.WithAllPages())
+	if err != nil {
+		return nil, scalewayQuotaErr("list quotas", err)
+	}
+	out := map[string]uint64{}
+	for _, q := range resp.Quota {
+		if q == nil {
+			continue
+		}
+		name, ok := strings.CutPrefix(q.Name, scalewayQuotaPrefix)
+		if !ok {
+			continue
+		}
+		typ := strings.ReplaceAll(name, "_", "-")
+		// The zone entry wins, even when unlimited (Limit nil); the global
+		// entry applies only when there is no zone entry.
+		var zoneLimit, globalLimit *iam.QuotumLimit
+		for _, l := range q.Limits {
+			switch {
+			case l == nil:
+			case l.Zone != nil && *l.Zone == zone:
+				zoneLimit = l
+			case l.Global != nil && *l.Global:
+				globalLimit = l
+			}
+		}
+		if lim := cmp.Or(zoneLimit, globalLimit); lim != nil && lim.Limit != nil {
+			out[typ] = *lim.Limit
+		}
+	}
+	return out, nil
+}
+
+// scalewayQuotaErr turns a denied or missing quota call into
+// errQuotaUnreadable and wraps any other error.
+func scalewayQuotaErr(what string, err error) error {
+	var (
+		resp   *scw.ResponseError
+		denied *scw.PermissionsDeniedError
+		auth   *scw.DeniedAuthenticationError
+		gone   *scw.ResourceNotFoundError
+	)
+	switch {
+	case errors.As(err, &denied), errors.As(err, &auth), errors.As(err, &gone):
+		return errQuotaUnreadable
+	case errors.As(err, &resp) && (resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404):
+		return errQuotaUnreadable
+	}
+	return fmt.Errorf("scaleway: %s: %w", what, err)
+}
+
+// Quota checks the organization's quota for size in zone (IAM ListQuota)
+// against the servers of that type already there (Instance dashboard,
+// GET /instance/v1/zones/{zone}/dashboard). The quota is per type and zone,
+// so replacing does not change the check: a server of another type or zone
+// does not count against it.
+func (s *scaleway) Quota(ctx context.Context, zone, size string, _ bool) (QuotaStatus, error) {
+	z, err := scw.ParseZone(zone)
+	if err != nil {
+		return QuotaStatus{}, fmt.Errorf("scaleway: invalid zone %q", zone)
+	}
+	c, err := s.client()
+	if err != nil {
+		return QuotaStatus{}, err
+	}
+	quotas, err := s.typeQuotas(ctx, c, z)
+	if errors.Is(err, errQuotaUnreadable) {
+		return QuotaStatus{OK: true, Reason: "not checked: " + err.Error()}, nil
+	}
+	if err != nil {
+		return QuotaStatus{}, err
+	}
+	limit, ok := quotas[size]
+	switch {
+	case !ok:
+		return QuotaStatus{OK: true}, nil
+	case limit == 0:
+		return QuotaStatus{Reason: fmt.Sprintf("scaleway: quota for %s in %s is 0 — %s", size, zone, quotaFix("scaleway"))}, nil
+	}
+	dash, err := instance.NewAPI(c).GetDashboard(&instance.GetDashboardRequest{Zone: z}, scw.WithContext(ctx))
+	if err != nil || dash.Dashboard == nil {
+		return QuotaStatus{OK: true, Reason: "servers in use not checked"}, nil //nolint:nilerr // the limit is not 0: usage is best effort
+	}
+	if used := uint64(dash.Dashboard.ServersByTypes[size]); used >= limit {
+		return QuotaStatus{Reason: fmt.Sprintf("scaleway: quota for %s in %s is %d and %d in use — %s", size, zone, limit, used, quotaFix("scaleway"))}, nil
+	}
+	return QuotaStatus{OK: true}, nil
 }
 
 var scalewayZoneRe = regexp.MustCompile(`^([a-z]{2}-[a-z]{3})-[0-9]+$`)

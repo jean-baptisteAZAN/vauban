@@ -80,5 +80,13 @@ func writeDoctor(w io.Writer, p *detect.Project, mods []engine.Module, ts []tool
 		parts = append(parts, s)
 	}
 	ui.Row(w, "tools", strings.Join(parts, "  "))
-	ui.Row(w, "next", "vauban plan")
+	next := "vauban plan"
+	if p.GitHubRepo == "" {
+		commit, create := remoteSteps(p)
+		next = create
+		if commit != "" {
+			next = "commit first (" + commit + "), then " + create
+		}
+	}
+	ui.Row(w, "next", next)
 }
