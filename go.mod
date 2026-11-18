@@ -9,6 +9,7 @@ require (
 	github.com/digitalocean/godo v1.243.0
 	github.com/hetznercloud/hcloud-go/v2 v2.53.0
 	github.com/pelletier/go-toml/v2 v2.4.3
+	github.com/scaleway/scaleway-sdk-go v1.39.0
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -50,4 +51,5 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.6.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
