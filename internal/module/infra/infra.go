@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -25,15 +27,24 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/tools"
 )
 
-// Marker is the first line of every infra/main.tf vauban generates.
-const Marker = "# managed by vauban"
+// Marker is the first line of every infra/main.tf vauban generates. The
+// second line records the fingerprint (cloud/region/size) it was rendered for.
+const (
+	Marker            = "# managed by vauban"
+	fingerprintPrefix = "# fingerprint: "
+)
 
 const (
 	dir       = "infra"
 	mainPath  = dir + "/main.tf"
 	ciPath    = dir + "/cloud-init.yaml"
-	gitignore = "*.tfstate*\n.terraform/\n"
+	planFile  = "tfplan"
+	gitignore = "*.tfstate*\n.terraform/\n" + planFile + "\n"
+	maxPlan   = 64 * 1024 // bytes of plan text kept in outputs
 )
+
+// ConfirmTitle is what infra:apply asks before a destructive plan.
+const ConfirmTitle = "infra changes will destroy or replace resources"
 
 //go:embed cloud-init.yaml.tmpl
 var cloudInitSrc string
@@ -57,23 +68,28 @@ func (*Module) Detect(p *detect.Project) engine.Status {
 	return engine.StatusMissing
 }
 
-// Plan returns the full setup for a repo without Terraform, only the tofu
-// steps (plus drift handling) when infra/ is vauban-managed, and nothing when
-// the repo has Terraform of its own.
+// Plan returns the infra steps, or nothing when the repo has Terraform of its
+// own. Every step is idempotent, so the list is the same whether infra/ is
+// new or vauban-managed; infra:main-tf only re-renders an existing file when
+// StaleSteps reports drift (or with --force). Changes always go through a
+// saved plan: init, plan (saved to infra/tfplan), apply of that plan.
 func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) {
-	managed := isManaged(p.Root)
-	if p.HasTerraform && !managed {
+	if p.HasTerraform && !isManaged(p.Root) {
 		return nil, nil
-	}
-	prov, err := cloud.Get(c.Cloud)
-	if err != nil {
-		return nil, err
 	}
 	st, err := engine.LoadState(p.Root)
 	if err != nil {
 		return nil, err
 	}
-	drift := drifted(st, c)
+	if applied := st.Outputs["infra_fingerprint"]; applied != "" {
+		if old, _, _ := strings.Cut(applied, "/"); old != c.Cloud {
+			return nil, fmt.Errorf("changing cloud (%s → %s) is not supported in place: run vauban destroy first, then vauban apply", old, c.Cloud)
+		}
+	}
+	prov, err := cloud.Get(c.Cloud)
+	if err != nil {
+		return nil, err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("infra: home directory: %w", err)
@@ -86,56 +102,30 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 		Size:   orDefault(c.Size, prov.DefaultSize()),
 	}
 	tofu, _ := tools.Tofu()
-	fp := fingerprint(c)
-
-	mainTF := mainTF{prov: prov, in: in, keyPath: keyPath, rerender: drift}
-	initStep := engine.RunCommand{StepID: "infra:init", Cmd: tofuCmd(tofu, "init", "-input=false")}
-	planStep := withCreds{prov: prov, RunCommand: engine.RunCommand{
-		StepID: "infra:plan",
-		Cmd:    tofuCmd(tofu, "plan", "-no-color", "-input=false"),
-		Parse:  func(b []byte) (engine.Outputs, error) { return engine.Outputs{"tofu_plan": string(b)}, nil },
-	}}
-	apply := withCreds{prov: prov, RunCommand: engine.RunCommand{
-		StepID: "infra:apply",
-		Cmd:    tofuCmd(tofu, "apply", "-auto-approve", "-input=false"),
-		Parse:  func([]byte) (engine.Outputs, error) { return engine.Outputs{"infra_fingerprint": fp}, nil },
-	}}
-	output := engine.RunCommand{StepID: "infra:output", Cmd: tofuCmd(tofu, "output", "-json"), Parse: parseOutput}
-
-	var steps []engine.Step
-	switch {
-	case !managed:
-		steps = []engine.Step{
-			deployKey{project: name, path: keyPath},
-			mainTF,
-			cloudInit{keyPath: keyPath},
-			engine.WriteFile{Path: dir + "/.gitignore", Content: []byte(gitignore), Mode: 0o644},
-			initStep,
-		}
-	case drift:
-		steps = []engine.Step{mainTF, initStep}
-	default:
-		steps = []engine.Step{initStep}
-	}
-	if drift {
-		steps = append(steps, planStep)
-	}
-	return append(steps, apply, output), nil
+	return []engine.Step{
+		deployKey{project: name, path: keyPath},
+		mainTF{prov: prov, in: in, fp: fingerprint(c), keyPath: keyPath, rerender: StaleSteps(st, c) != nil},
+		cloudInit{keyPath: keyPath},
+		engine.WriteFile{Path: dir + "/.gitignore", Content: []byte(gitignore), Mode: 0o644},
+		engine.RunCommand{StepID: "infra:init", Cmd: tofuCmd(tofu, "init", "-input=false")},
+		planStep{tofu: tofu, prov: prov},
+		applyStep{tofu: tofu, prov: prov},
+		engine.RunCommand{StepID: "infra:output", Cmd: tofuCmd(tofu, "output", "-json"), Parse: parseOutput},
+	}, nil
 }
 
 // StaleSteps returns the step IDs the caller must clear from st.Done before
-// Execute when vauban.yaml's cloud, region or size no longer match what was
-// applied, so main.tf is re-rendered, the change is planned and re-applied.
-// It returns nil when there is no drift.
+// Execute, or nil. They are stale when the applied fingerprint differs from
+// vauban.yaml (drift), or when the rendered main.tf was never applied (an
+// interrupted run), so a resume always re-renders and re-plans before apply.
 func StaleSteps(st *engine.State, c *config.Config) []string {
-	if !drifted(st, c) {
+	applied, rendered := st.Outputs["infra_fingerprint"], st.Outputs["rendered_fingerprint"]
+	drift := applied != "" && applied != fingerprint(c)
+	unapplied := rendered != "" && rendered != applied
+	if !drift && !unapplied {
 		return nil
 	}
 	return []string{"infra:main-tf", "infra:plan", "infra:apply", "infra:output"}
-}
-
-func drifted(st *engine.State, c *config.Config) bool {
-	return st.Done["infra:apply"] && st.Outputs["infra_fingerprint"] != fingerprint(c)
 }
 
 // fingerprint is cloud/region/size with provider defaults filled in.
@@ -147,22 +137,45 @@ func fingerprint(c *config.Config) string {
 	return c.Cloud + "/" + region + "/" + size
 }
 
-func isManaged(root string) bool {
+// headLines returns up to the first two lines of infra/main.tf.
+func headLines(root string) ([]string, error) {
 	f, err := os.Open(filepath.Join(root, mainPath))
 	if err != nil {
-		return false
+		return nil, err
 	}
 	defer f.Close()
-	line, err := bufio.NewReader(f).ReadString('\n')
-	if err != nil && line == "" {
-		return false
+	var lines []string
+	sc := bufio.NewScanner(f)
+	for len(lines) < 2 && sc.Scan() {
+		lines = append(lines, strings.TrimRight(sc.Text(), "\r"))
 	}
-	return strings.TrimRight(line, "\r\n") == Marker
+	return lines, sc.Err()
+}
+
+func isManaged(root string) bool {
+	lines, err := headLines(root)
+	return err == nil && len(lines) > 0 && lines[0] == Marker
+}
+
+// readFingerprint returns the fingerprint recorded in infra/main.tf.
+func readFingerprint(root string) (string, error) {
+	lines, err := headLines(root)
+	if err != nil {
+		return "", err
+	}
+	if len(lines) == 2 && lines[0] == Marker {
+		if fp, ok := strings.CutPrefix(lines[1], fingerprintPrefix); ok && fp != "" {
+			return fp, nil
+		}
+	}
+	return "", fmt.Errorf("%s has no %q line: rerun with --force to re-render it", mainPath, strings.TrimSpace(fingerprintPrefix))
 }
 
 func tofuCmd(tofu string, args ...string) engine.Cmd {
 	return engine.Cmd{Name: tofu, Args: append([]string{"-chdir=" + dir}, args...)}
 }
+
+func cmdLine(c engine.Cmd) string { return strings.Join(append([]string{c.Name}, c.Args...), " ") }
 
 func parseOutput(b []byte) (engine.Outputs, error) {
 	var raw map[string]struct {
@@ -182,21 +195,107 @@ func parseOutput(b []byte) (engine.Outputs, error) {
 	return out, nil
 }
 
-// withCreds runs a tofu command with the provider credentials, read only at
-// Apply time. Describe never shows them.
-type withCreds struct {
-	engine.RunCommand
-	prov cloud.Provider
-}
-
-func (w withCreds) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, error) {
-	creds, err := w.prov.CredentialsEnv()
+// runWithCreds runs cmd from env.Root with the provider credentials, read
+// only now so plan output never needs (or shows) them.
+func runWithCreds(ctx context.Context, env *engine.Env, prov cloud.Provider, cmd engine.Cmd) ([]byte, error) {
+	creds, err := prov.CredentialsEnv()
 	if err != nil {
 		return nil, err
 	}
-	rc := w.RunCommand
-	rc.Cmd.Env = append(append([]string(nil), rc.Cmd.Env...), creds...)
-	return rc.Apply(ctx, env)
+	cmd.Dir = env.Root
+	cmd.Env = creds
+	return env.Run.Run(ctx, cmd)
+}
+
+// planStep saves a plan to infra/tfplan and reports whether it destroys or
+// replaces anything. Outputs tofu_plan (human text, capped) and
+// plan_destructive ("true"/"false").
+type planStep struct {
+	tofu string
+	prov cloud.Provider
+}
+
+func (planStep) ID() string { return "infra:plan" }
+func (p planStep) cmds() (plan, show engine.Cmd) {
+	return tofuCmd(p.tofu, "plan", "-input=false", "-no-color", "-out="+planFile),
+		tofuCmd(p.tofu, "show", "-json", planFile)
+}
+func (p planStep) Describe() string {
+	plan, show := p.cmds()
+	return "$ " + cmdLine(plan) + " && " + cmdLine(show)
+}
+
+func (p planStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, error) {
+	plan, show := p.cmds()
+	text, err := runWithCreds(ctx, env, p.prov, plan)
+	if err != nil {
+		return nil, err
+	}
+	js, err := runWithCreds(ctx, env, p.prov, show)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		ResourceChanges []struct {
+			Change struct {
+				Actions []string `json:"actions"`
+			} `json:"change"`
+		} `json:"resource_changes"`
+	}
+	if err := json.Unmarshal(js, &parsed); err != nil {
+		return nil, fmt.Errorf("parse tofu show: %w", err)
+	}
+	destructive := false
+	for _, rc := range parsed.ResourceChanges {
+		if slices.Contains(rc.Change.Actions, "delete") {
+			destructive = true
+		}
+	}
+	return engine.Outputs{"tofu_plan": truncate(string(text)), "plan_destructive": strconv.FormatBool(destructive)}, nil
+}
+
+// truncate caps plan text at maxPlan bytes.
+func truncate(s string) string {
+	if len(s) <= maxPlan {
+		return s
+	}
+	const suffix = "\n… (truncated)\n"
+	return strings.ToValidUTF8(s[:maxPlan-len(suffix)], "") + suffix
+}
+
+// applyStep applies exactly the saved plan. A destructive plan needs
+// env.Confirm; without approval nothing runs and ErrNotConfirmed is returned.
+// It records the fingerprint of the main.tf on disk as infra_fingerprint.
+type applyStep struct {
+	tofu string
+	prov cloud.Provider
+}
+
+func (applyStep) ID() string         { return "infra:apply" }
+func (a applyStep) cmd() engine.Cmd  { return tofuCmd(a.tofu, "apply", "-input=false", planFile) }
+func (a applyStep) Describe() string { return "$ " + cmdLine(a.cmd()) }
+
+func (a applyStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, error) {
+	fp, err := readFingerprint(env.Root)
+	if err != nil {
+		return nil, err
+	}
+	if env.In["plan_destructive"] == "true" {
+		if env.Confirm == nil {
+			return nil, engine.ErrNotConfirmed
+		}
+		ok, err := env.Confirm(ConfirmTitle, env.In["tofu_plan"])
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, engine.ErrNotConfirmed
+		}
+	}
+	if _, err := runWithCreds(ctx, env, a.prov, a.cmd()); err != nil {
+		return nil, err
+	}
+	return engine.Outputs{"infra_fingerprint": fp}, nil
 }
 
 // deployKey creates the project's passphrase-less deploy key pair unless it
@@ -249,11 +348,14 @@ func readPub(path string) (string, error) {
 	return pub, nil
 }
 
-// mainTF renders infra/main.tf at Apply time, once the deploy key exists. It
-// skips an existing file unless Force, or rerender after a config drift.
+// mainTF renders infra/main.tf at Apply time, once the deploy key exists:
+// marker, fingerprint line, provider Terraform. It keeps an existing file
+// unless Force or rerender (drift). Outputs rendered_fingerprint, the
+// fingerprint of the main.tf on disk.
 type mainTF struct {
 	prov     cloud.Provider
 	in       cloud.TFInput
+	fp       string
 	keyPath  string
 	rerender bool
 }
@@ -262,8 +364,15 @@ func (m mainTF) ID() string       { return "infra:main-tf" }
 func (m mainTF) Describe() string { return "write " + mainPath }
 
 func (m mainTF) Apply(_ context.Context, env *engine.Env) (engine.Outputs, error) {
-	if skip, err := skipExisting(env, mainPath, m.rerender); skip || err != nil {
+	skip, err := skipExisting(env, mainPath, m.rerender)
+	if err != nil {
 		return nil, err
+	}
+	if skip {
+		if fp, err := readFingerprint(env.Root); err == nil {
+			return engine.Outputs{"rendered_fingerprint": fp}, nil
+		}
+		return nil, nil
 	}
 	pub, err := deployPubkey(env, m.keyPath)
 	if err != nil {
@@ -275,7 +384,11 @@ func (m mainTF) Apply(_ context.Context, env *engine.Env) (engine.Outputs, error
 	if err != nil {
 		return nil, err
 	}
-	return nil, write(env.Root, mainPath, append([]byte(Marker+"\n"), tf...))
+	content := append([]byte(Marker+"\n"+fingerprintPrefix+m.fp+"\n"), tf...)
+	if err := write(env.Root, mainPath, content); err != nil {
+		return nil, err
+	}
+	return engine.Outputs{"rendered_fingerprint": m.fp}, nil
 }
 
 // cloudInit renders infra/cloud-init.yaml at Apply time with the deploy key

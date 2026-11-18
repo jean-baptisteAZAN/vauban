@@ -70,7 +70,8 @@ func redact(s string, env []string, stdin []byte) string {
 }
 
 // FakeRunner records commands instead of running them. Responses and Errors
-// are keyed by Name+" "+first arg; unmatched commands return empty output.
+// are keyed by the full command line (Name and Args joined by spaces), else
+// by Name+" "+first arg; unmatched commands return empty output.
 type FakeRunner struct {
 	Calls     []Cmd
 	Responses map[string][]byte
@@ -80,12 +81,18 @@ type FakeRunner struct {
 // Run records cmd and returns the canned response or error for its key.
 func (f *FakeRunner) Run(_ context.Context, cmd Cmd) ([]byte, error) {
 	f.Calls = append(f.Calls, cmd)
-	key := cmd.Name
+	full := strings.Join(append([]string{cmd.Name}, cmd.Args...), " ")
+	short := cmd.Name
 	if len(cmd.Args) > 0 {
-		key += " " + cmd.Args[0]
+		short += " " + cmd.Args[0]
 	}
-	if err := f.Errors[key]; err != nil {
-		return nil, err
+	for _, key := range []string{full, short} {
+		if err := f.Errors[key]; err != nil {
+			return nil, err
+		}
 	}
-	return f.Responses[key], nil
+	if out, ok := f.Responses[full]; ok {
+		return out, nil
+	}
+	return f.Responses[short], nil
 }

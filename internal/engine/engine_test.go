@@ -205,3 +205,18 @@ func TestExecuteRejectsDuplicateIDs(t *testing.T) {
 		t.Fatalf("applied %d steps before rejecting", n)
 	}
 }
+
+func TestExecuteNilConfirmUnusedByUngatedSteps(t *testing.T) {
+	root := t.TempDir()
+	steps := []Step{
+		WriteFile{Path: "a.txt", Content: []byte("a")},
+		RunCommand{StepID: "m:cmd", Cmd: Cmd{Name: "true"}},
+	}
+	env := &Env{Root: root, Run: &FakeRunner{}} // Confirm deliberately nil
+	if err := Execute(context.Background(), steps, &State{}, env); err != nil {
+		t.Fatalf("Execute with nil Confirm: %v", err)
+	}
+	if ErrNotConfirmed == nil || ErrNotConfirmed.Error() != "not confirmed" {
+		t.Fatalf("ErrNotConfirmed = %v", ErrNotConfirmed)
+	}
+}

@@ -50,6 +50,7 @@ write_files:
     content: |
       Unattended-Upgrade::Automatic-Reboot "true";
       Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+      Unattended-Upgrade::Origins-Pattern { "origin=Docker"; };
   - path: /etc/docker/daemon.json
     permissions: "0644"
     content: |
@@ -100,6 +101,9 @@ runcmd:
   - systemctl enable --now docker-prune.timer
   - systemctl restart ssh
   - systemctl restart fail2ban
+  # Host firewall. Ports published by Docker containers bypass ufw (Docker
+  # writes its own iptables rules), so the cloud firewall (22, 80, 443 only)
+  # in main.tf is the real perimeter; ufw guards host services.
   - ufw default deny incoming
   - ufw default allow outgoing
   - ufw allow 22/tcp

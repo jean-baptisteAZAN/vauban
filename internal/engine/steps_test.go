@@ -188,3 +188,24 @@ func TestExecRunnerRedactsSecrets(t *testing.T) {
 		t.Fatalf("stdin: err = %v, want redacted", err)
 	}
 }
+
+func TestFakeRunnerFullCommandKey(t *testing.T) {
+	boom := errors.New("boom")
+	fr := &FakeRunner{
+		Responses: map[string][]byte{
+			"tofu -chdir=infra":                   []byte("short"),
+			"tofu -chdir=infra show -json tfplan": []byte("full"),
+		},
+		Errors: map[string]error{"tofu -chdir=infra plan -out=tfplan": boom},
+	}
+	ctx := context.Background()
+	if out, _ := fr.Run(ctx, Cmd{Name: "tofu", Args: []string{"-chdir=infra", "show", "-json", "tfplan"}}); string(out) != "full" {
+		t.Errorf("full key: %q", out)
+	}
+	if out, _ := fr.Run(ctx, Cmd{Name: "tofu", Args: []string{"-chdir=infra", "output", "-json"}}); string(out) != "short" {
+		t.Errorf("short key fallback: %q", out)
+	}
+	if _, err := fr.Run(ctx, Cmd{Name: "tofu", Args: []string{"-chdir=infra", "plan", "-out=tfplan"}}); !errors.Is(err, boom) {
+		t.Errorf("full key error: %v", err)
+	}
+}

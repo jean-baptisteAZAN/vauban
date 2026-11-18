@@ -3,6 +3,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -46,7 +47,14 @@ type Env struct {
 	Run   Runner
 	In    Outputs // accumulated non-secret outputs of previous steps
 	Log   io.Writer
+	// Confirm asks the user to approve a risky step (title, then details such
+	// as a plan). Steps that need it treat nil as "not confirmed".
+	Confirm func(title, details string) (bool, error)
 }
+
+// ErrNotConfirmed is returned by a step whose risky action was not approved.
+// Nothing was changed; rerunning asks again.
+var ErrNotConfirmed = errors.New("not confirmed")
 
 func (e *Env) logf(format string, args ...any) {
 	if e.Log != nil {
