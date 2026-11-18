@@ -268,7 +268,8 @@ func writeFile(t *testing.T, name string, data []byte, perm os.FileMode) {
 }
 
 // pip installs the project itself when it is a package; poetry installs
-// through poetry and runs the tests in its environment.
+// the dependencies only (--no-root: the app need not be a package) and runs
+// the tests in its environment.
 func TestPythonPipAndPoetryInstall(t *testing.T) {
 	for _, tc := range []struct {
 		name, pm  string
@@ -284,7 +285,7 @@ func TestPythonPipAndPoetryInstall(t *testing.T) {
 		{"both", "pip", []string{"pyproject.toml", "requirements.txt"},
 			[]string{"run: pip install -r requirements.txt\n      - run: pip install .\n"}, nil},
 		{"poetry", "poetry", []string{"pyproject.toml", "requirements.txt"},
-			[]string{"run: pipx install poetry\n      - run: poetry install\n", "run: poetry run pip install pytest\n      - run: poetry run pytest\n"},
+			[]string{"run: pipx install poetry\n      - run: poetry install --no-root\n", "run: poetry run pip install pytest\n      - run: poetry run pytest\n"},
 			[]string{"pip install .", "pip install -r", "run: pytest\n"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
