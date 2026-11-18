@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/jean-baptisteAZAN/vauban/security/advisories/new
+    about: Please report security issues privately, not as a public issue.
+  - name: Read the README
+    url: https://github.com/jean-baptisteAZAN/vauban#readme
+    about: Install, quickstart, supported clouds and known limitations.

@@ -1,0 +1,62 @@
+name: Bug report
+description: Something vauban did (or generated) is wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Please **do not paste secrets** (tokens, private keys, `.env` content).
+        Security issues go through [a private advisory](https://github.com/jean-baptisteAZAN/vauban/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, and a minimal repo if you can share one.
+      placeholder: |
+        1. vauban plan --cloud hetzner
+        2. vauban apply
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The relevant vauban output (and exit code). Redact anything sensitive.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: vauban version
+      description: Output of `vauban version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options: [macOS, Linux]
+    validations:
+      required: true
+  - type: dropdown
+    id: cloud
+    attributes:
+      label: Cloud
+      options: [Scaleway, DigitalOcean, Hetzner, Not cloud-related]
+  - type: dropdown
+    id: stack
+    attributes:
+      label: Stack
+      options: [Go, Node/TypeScript, Python, Not stack-related]
+  - type: textarea
+    id: doctor
+    attributes:
+      label: vauban doctor
+      description: Output of `vauban doctor` in your repo, if relevant.
+      render: shell
