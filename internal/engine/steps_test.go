@@ -177,3 +177,14 @@ func TestExecRunner(t *testing.T) {
 		t.Fatalf("err = %v, want stderr included", err)
 	}
 }
+
+func TestExecRunnerRedactsSecrets(t *testing.T) {
+	_, err := ExecRunner{}.Run(context.Background(), Cmd{Name: "sh", Args: []string{"-c", `echo "$TOK" >&2; exit 1`}, Env: []string{"TOK=s3cr3t-value"}})
+	if err == nil || strings.Contains(err.Error(), "s3cr3t-value") || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("env: err = %v, want redacted", err)
+	}
+	_, err = ExecRunner{}.Run(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "cat >&2; exit 1"}, Stdin: strings.NewReader("stdin-secret\n")})
+	if err == nil || strings.Contains(err.Error(), "stdin-secret") || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("stdin: err = %v, want redacted", err)
+	}
+}

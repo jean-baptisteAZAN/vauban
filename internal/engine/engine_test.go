@@ -193,3 +193,15 @@ func TestLoadStateAbsent(t *testing.T) {
 		t.Fatalf("state = %+v, want empty initialised", st)
 	}
 }
+
+func TestExecuteRejectsDuplicateIDs(t *testing.T) {
+	var n int
+	steps := []Step{countStep{id: "m:a", calls: &n}, countStep{id: "m:a", calls: &n}}
+	err := Execute(context.Background(), steps, &State{}, &Env{Root: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), `duplicate step id "m:a"`) {
+		t.Fatalf("err = %v, want duplicate step id", err)
+	}
+	if n != 0 {
+		t.Fatalf("applied %d steps before rejecting", n)
+	}
+}

@@ -105,7 +105,17 @@ func allDone(ids []string, done map[string]bool) bool {
 
 // Execute applies steps in order, skipping those already done in st and
 // saving st after every step so an interrupted run resumes where it stopped.
+// Outputs saved in st are merged into env.In before any step runs and take
+// precedence over values already in env.In. Duplicate step IDs are rejected
+// before anything is applied.
 func Execute(ctx context.Context, steps []Step, st *State, env *Env) error {
+	seen := make(map[string]bool, len(steps))
+	for _, s := range steps {
+		if seen[s.ID()] {
+			return fmt.Errorf("duplicate step id %q", s.ID())
+		}
+		seen[s.ID()] = true
+	}
 	st.init()
 	if env.In == nil {
 		env.In = Outputs{}

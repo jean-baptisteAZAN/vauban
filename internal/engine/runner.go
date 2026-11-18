@@ -32,17 +32,41 @@ func (ExecRunner) Run(ctx context.Context, cmd Cmd) ([]byte, error) {
 	if len(cmd.Env) > 0 {
 		c.Env = append(os.Environ(), cmd.Env...)
 	}
-	c.Stdin = cmd.Stdin
+	var stdin []byte
+	if cmd.Stdin != nil {
+		b, err := io.ReadAll(cmd.Stdin)
+		if err != nil {
+			return nil, fmt.Errorf("%s: read stdin: %w", cmd.Name, err)
+		}
+		stdin = b
+		c.Stdin = bytes.NewReader(b)
+	}
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
 	if err := c.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		if msg := strings.TrimSpace(redact(stderr.String(), cmd.Env, stdin)); msg != "" {
 			return stdout.Bytes(), fmt.Errorf("%s: %w: %s", cmd.Name, err, msg)
 		}
 		return stdout.Bytes(), fmt.Errorf("%s: %w", cmd.Name, err)
 	}
 	return stdout.Bytes(), nil
+}
+
+// redact replaces Env values and stdin content (4+ chars) in s with ***.
+func redact(s string, env []string, stdin []byte) string {
+	secrets := []string{string(stdin), strings.TrimSpace(string(stdin))}
+	for _, kv := range env {
+		if _, v, ok := strings.Cut(kv, "="); ok {
+			secrets = append(secrets, v)
+		}
+	}
+	for _, v := range secrets {
+		if len(v) >= 4 {
+			s = strings.ReplaceAll(s, v, "***")
+		}
+	}
+	return s
 }
 
 // FakeRunner records commands instead of running them. Responses and Errors
