@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -88,11 +89,13 @@ func (d *digitalocean) client() (*godo.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	apiURL := "https://api.digitalocean.com/"
 	opts := []godo.ClientOpt{godo.SetUserAgent("vauban")}
 	if d.endpoint != "" {
+		apiURL = d.endpoint
 		opts = append(opts, godo.SetBaseURL(d.endpoint))
 	}
-	return godo.New(oauthClient(tok), opts...)
+	return godo.New(bearerClient(tok, apiURL), opts...)
 }
 
 func (d *digitalocean) CheckAuth(ctx context.Context) error {
@@ -213,15 +216,23 @@ func (*digitalocean) Terraform(in TFInput) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// bearerTransport adds the API token to every request.
-type bearerTransport struct{ token string }
+// bearerTransport adds the API token to requests for the API host only, so it
+// is never sent to another host (e.g. on a cross-host redirect).
+type bearerTransport struct{ token, host string }
 
 func (t bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Set("Authorization", "Bearer "+t.token)
+	if r.URL.Host == t.host {
+		r = r.Clone(r.Context())
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	}
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func oauthClient(token string) *http.Client {
-	return &http.Client{Transport: bearerTransport{token}}
+// bearerClient returns an HTTP client that authenticates requests to apiURL.
+func bearerClient(token, apiURL string) *http.Client {
+	host := ""
+	if u, err := url.Parse(apiURL); err == nil {
+		host = u.Host
+	}
+	return &http.Client{Transport: bearerTransport{token, host}}
 }

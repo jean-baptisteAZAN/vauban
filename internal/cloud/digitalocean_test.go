@@ -90,8 +90,8 @@ func TestDigitaloceanTerraformErrors(t *testing.T) {
 	}
 }
 
-// doctlConfigDir returns the doctl config directory under a fresh HOME and
-// clears every token variable.
+// doctlHome points HOME at a fresh directory, clears every token variable and
+// returns the doctl config directory under it.
 func doctlHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -257,5 +257,29 @@ func TestDigitaloceanSizes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Sizes = %#v", got)
+	}
+}
+
+func TestBearerClientScopedToAPIHost(t *testing.T) {
+	var got []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "api:"+r.Header.Get("Authorization"))
+	}))
+	defer api.Close()
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "other:"+r.Header.Get("Authorization"))
+	}))
+	defer other.Close()
+	c := bearerClient("tok", api.URL)
+	for _, u := range []string{api.URL, other.URL} {
+		resp, err := c.Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	want := []string{"api:Bearer tok", "other:"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }

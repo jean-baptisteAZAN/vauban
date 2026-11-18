@@ -53,7 +53,7 @@ func (*Module) Detect(p *detect.Project) engine.Status {
 
 type data struct {
 	Version, PM, Port, UV, Entry, Lock string
-	Berry                               bool
+	Berry                              bool
 }
 
 func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) {

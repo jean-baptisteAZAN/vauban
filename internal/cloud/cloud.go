@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // Option is a selectable value (region, size) with a human label.
@@ -42,17 +43,28 @@ type Provider interface {
 //go:embed tf/*
 var tfTemplates embed.FS
 
-var providers = map[string]Provider{}
+var (
+	providersMu sync.RWMutex
+	providers   = map[string]Provider{}
+)
 
-func register(p Provider) { providers[p.ID()] = p }
+func register(p Provider) {
+	providersMu.Lock()
+	defer providersMu.Unlock()
+	providers[p.ID()] = p
+}
 
 // Register installs p, replacing any provider with the same id, and returns a
 // function that restores the previous state. It lets tests in other packages
 // install a fake provider.
 func Register(p Provider) (restore func()) {
+	providersMu.Lock()
 	prev, had := providers[p.ID()]
-	register(p)
+	providers[p.ID()] = p
+	providersMu.Unlock()
 	return func() {
+		providersMu.Lock()
+		defer providersMu.Unlock()
 		if had {
 			providers[p.ID()] = prev
 		} else {
@@ -63,6 +75,8 @@ func Register(p Provider) (restore func()) {
 
 // Get returns the provider with the given id.
 func Get(id string) (Provider, error) {
+	providersMu.RLock()
+	defer providersMu.RUnlock()
 	p, ok := providers[id]
 	if !ok {
 		return nil, fmt.Errorf("unknown cloud %q", id)
@@ -72,6 +86,8 @@ func Get(id string) (Provider, error) {
 
 // IDs returns the registered provider ids, sorted.
 func IDs() []string {
+	providersMu.RLock()
+	defer providersMu.RUnlock()
 	ids := make([]string, 0, len(providers))
 	for id := range providers {
 		ids = append(ids, id)
