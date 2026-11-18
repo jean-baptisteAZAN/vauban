@@ -8,6 +8,7 @@ package cloud
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"slices"
 	"strings"
@@ -19,7 +20,7 @@ type Option struct{ ID, Label string }
 // TFInput is what a provider needs to render its OpenTofu configuration.
 type TFInput struct {
 	Name, Region, Size string
-	SSHPublicKeys      []string // deploy key + author key
+	SSHPublicKeys      []string // deploy key only; the author key is installed via cloud-init
 }
 
 // Provider is a cloud the VM can be provisioned on.
@@ -38,9 +39,27 @@ type Provider interface {
 	Terraform(in TFInput) ([]byte, error)
 }
 
+//go:embed tf/*
+var tfTemplates embed.FS
+
 var providers = map[string]Provider{}
 
 func register(p Provider) { providers[p.ID()] = p }
+
+// Register installs p, replacing any provider with the same id, and returns a
+// function that restores the previous state. It lets tests in other packages
+// install a fake provider.
+func Register(p Provider) (restore func()) {
+	prev, had := providers[p.ID()]
+	register(p)
+	return func() {
+		if had {
+			providers[p.ID()] = prev
+		} else {
+			delete(providers, p.ID())
+		}
+	}
+}
 
 // Get returns the provider with the given id.
 func Get(id string) (Provider, error) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -15,8 +16,14 @@ import (
 var update = flag.Bool("update", false, "regenerate golden files")
 
 func TestRegistry(t *testing.T) {
-	if got := IDs(); !reflect.DeepEqual(got, []string{"hetzner"}) {
-		t.Errorf("IDs() = %v", got)
+	ids := IDs()
+	if !slices.IsSorted(ids) {
+		t.Errorf("IDs() not sorted: %v", ids)
+	}
+	for _, id := range []string{"hetzner"} {
+		if !slices.Contains(ids, id) {
+			t.Errorf("IDs() = %v, missing %s", ids, id)
+		}
 	}
 	p, err := Get("hetzner")
 	if err != nil || p.ID() != "hetzner" {
@@ -274,3 +281,34 @@ func TestHetznerSizes(t *testing.T) {
 		t.Errorf("Sizes = %#v", got)
 	}
 }
+
+type fakeProvider struct{ Provider }
+
+func (fakeProvider) ID() string { return "fake" }
+
+func TestRegisterRestore(t *testing.T) {
+	restore := Register(fakeProvider{})
+	if _, err := Get("fake"); err != nil {
+		t.Fatal(err)
+	}
+	restore()
+	if _, err := Get("fake"); err == nil {
+		t.Error("fake still registered after restore")
+	}
+	h, _ := Get("hetzner")
+	restore = Register(fakeProviderAs{id: "hetzner"})
+	if p, _ := Get("hetzner"); p == h {
+		t.Error("hetzner not replaced")
+	}
+	restore()
+	if p, _ := Get("hetzner"); p != h {
+		t.Error("hetzner not restored")
+	}
+}
+
+type fakeProviderAs struct {
+	Provider
+	id string
+}
+
+func (f fakeProviderAs) ID() string { return f.id }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,9 +25,6 @@ const (
 	hetznerSize            = "cx23"
 	hetznerProviderVersion = "1.70" // hetznercloud/hcloud 1.70.2
 )
-
-//go:embed tf/*
-var tfTemplates embed.FS
 
 var hetznerTmpl = template.Must(template.ParseFS(tfTemplates, "tf/hetzner.tf.tmpl"))
 
