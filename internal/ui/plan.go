@@ -111,21 +111,19 @@ func planLine(it PlanItem) string {
 	return "+ " + it.Text
 }
 
-// Drift writes a read-only tofu plan, highlighting lines that destroy or
-// replace resources.
-func Drift(w io.Writer, output string) {
+// Drift writes the infra config change and what apply will do about it.
+func Drift(w io.Writer, change string) {
+	const note = "apply will show the exact tofu plan and ask for confirmation before destroying or replacing anything"
 	fmt.Fprintln(w)
-	title := "drift preview (tofu plan, read-only)"
 	if Styled() {
-		title = Title.Render("drift preview") + Muted.Render(" (tofu plan, read-only)")
+		fmt.Fprintln(w, Title.Render("drift"))
+		fmt.Fprintln(w, "  "+change)
+		fmt.Fprintln(w, "  "+Warn.Render(note))
+		return
 	}
-	fmt.Fprintln(w, title)
-	for line := range strings.SplitSeq(strings.TrimRight(output, "\n"), "\n") {
-		if Styled() && (strings.Contains(line, "destroy") || strings.Contains(line, "must be replaced")) {
-			line = Err.Render(line)
-		}
-		fmt.Fprintln(w, "  "+line)
-	}
+	fmt.Fprintln(w, "drift")
+	fmt.Fprintln(w, "  "+change)
+	fmt.Fprintln(w, "  "+note)
 }
 
 // Warning writes a single warning line.

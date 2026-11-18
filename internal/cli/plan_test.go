@@ -15,21 +15,17 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
-	"github.com/jean-baptisteAZAN/vauban/internal/tools"
 )
 
 const planToken = "hcloud-plan-secret"
 
 // planProvider stands in for hetzner without network access.
-type planProvider struct{ credErr error }
+type planProvider struct{}
 
 func (*planProvider) ID() string            { return "hetzner" }
 func (*planProvider) DefaultRegion() string { return "nbg1" }
 func (*planProvider) DefaultSize() string   { return "cx23" }
-func (p *planProvider) CredentialsEnv() ([]string, error) {
-	if p.credErr != nil {
-		return nil, p.credErr
-	}
+func (*planProvider) CredentialsEnv() ([]string, error) {
 	return []string{"HCLOUD_TOKEN=" + planToken}, nil
 }
 func (*planProvider) CheckAuth(context.Context) error { return nil }
@@ -43,7 +39,7 @@ func (*planProvider) Terraform(cloud.TFInput) ([]byte, error) { return []byte("#
 
 // planEnv copies a fixture into a temp dir with a GitHub origin, isolates
 // HOME and installs the fake provider and runners. It returns the project root.
-func planEnv(t *testing.T, fixture string) (string, *planProvider, *engine.FakeRunner) {
+func planEnv(t *testing.T, fixture string) (string, *planProvider) {
 	t.Helper()
 	t.Setenv("NO_COLOR", "1")
 	t.Setenv("HOME", t.TempDir())
@@ -54,11 +50,6 @@ func planEnv(t *testing.T, fixture string) (string, *planProvider, *engine.FakeR
 	oldPre := engine.PreflightRunner
 	engine.PreflightRunner = pr
 	t.Cleanup(func() { engine.PreflightRunner = oldPre })
-
-	fr := &engine.FakeRunner{}
-	oldPlan := planRunner
-	planRunner = fr
-	t.Cleanup(func() { planRunner = oldPlan })
 
 	root := filepath.Join(t.TempDir(), "shop")
 	src := filepath.Join("..", "..", "testdata", fixture)
@@ -81,7 +72,7 @@ func planEnv(t *testing.T, fixture string) (string, *planProvider, *engine.FakeR
 		t.Fatal(err)
 	}
 	writeFile(t, root, ".git/config", "[remote \"origin\"]\n\turl = git@github.com:acme/shop.git\n")
-	return root, prov, fr
+	return root, prov
 }
 
 func writeFile(t *testing.T, root, rel, content string) {
@@ -135,7 +126,7 @@ func saveState(t *testing.T, root string, st *engine.State) {
 }
 
 func TestPlanNonTTYGoApp(t *testing.T) {
-	root, _, fr := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	before := listFiles(t, root)
 
 	out, err := execPlan(t, root, "--cloud", "hetzner")
@@ -184,13 +175,10 @@ func TestPlanNonTTYGoApp(t *testing.T) {
 	if !slices.Equal(after, want) {
 		t.Errorf("files after plan:\n%v\nwant:\n%v", after, want)
 	}
-	if len(fr.Calls) != 0 {
-		t.Errorf("plan ran commands: %+v", fr.Calls)
-	}
 }
 
 func TestPlanSkipsExistingUnlessForce(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	writeFile(t, root, "Dockerfile", "FROM scratch\n")
 
 	out, err := execPlan(t, root, "--cloud", "hetzner")
@@ -211,7 +199,7 @@ func TestPlanSkipsExistingUnlessForce(t *testing.T) {
 }
 
 func TestPlanNoConfigExit2(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	out, err := execPlan(t, root)
 	var exit *ExitError
 	if !errors.As(err, &exit) || exit.Code != 2 {
@@ -226,7 +214,7 @@ func TestPlanNoConfigExit2(t *testing.T) {
 }
 
 func TestPlanUsesExistingConfig(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\nregion: fsn1\nsize: cx33\ndomain: shop.example.com\napp_port: 9000\n")
 
 	out, err := execPlan(t, root)
@@ -246,7 +234,7 @@ func TestPlanUsesExistingConfig(t *testing.T) {
 }
 
 func TestPlanShowsDoneSteps(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	saveState(t, root, &engine.State{Done: map[string]bool{"file:Dockerfile": true}})
 	before := listFiles(t, root)
 
@@ -279,7 +267,7 @@ func staleState() *engine.State {
 }
 
 func TestBuildPlanClearsStaleSteps(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	saveState(t, root, staleState())
 	c := &config.Config{Project: "shop", Cloud: "hetzner", Region: "fsn1", Size: "cx23", AppPort: 8080}
 
@@ -310,7 +298,7 @@ func TestBuildPlanClearsStaleSteps(t *testing.T) {
 }
 
 func TestBuildPlanForceClearsFileSteps(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	saveState(t, root, staleState())
 	c := &config.Config{Project: "shop", Cloud: "hetzner", Region: "nbg1", Size: "cx23", AppPort: 8080}
 
@@ -328,70 +316,40 @@ func TestBuildPlanForceClearsFileSteps(t *testing.T) {
 	}
 }
 
-func driftSetup(t *testing.T) (string, *planProvider, *engine.FakeRunner) {
-	t.Helper()
-	root, prov, fr := planEnv(t, "go-app")
+func TestPlanDriftShowsFingerprints(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
 	saveState(t, root, staleState())
 	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
 	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\nregion: fsn1\nsize: cx23\napp_port: 8080\n")
-	return root, prov, fr
-}
-
-func TestPlanDriftPreview(t *testing.T) {
-	root, _, fr := driftSetup(t)
-	tofu, _ := tools.Tofu()
-	fr.Responses = map[string][]byte{
-		tofu + " -chdir=infra": []byte("  # hcloud_server.app must be replaced\n-/+ resource \"hcloud_server\" \"app\" {\nPlan: 1 to add, 0 to change, 1 to destroy.\n"),
-	}
 
 	out, err := execPlan(t, root)
 	if err != nil {
 		t.Fatalf("plan: %v\n%s", err, out)
 	}
-	for _, want := range []string{"hcloud_server.app must be replaced", "Plan: 1 to add, 0 to change, 1 to destroy."} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in:\n%s", want, out)
-		}
+	want := "\ndrift\n" +
+		"  infra config changed: hetzner/nbg1/cx23 → hetzner/fsn1/cx23\n" +
+		"  apply will show the exact tofu plan and ask for confirmation before destroying or replacing anything\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("missing drift section %q in:\n%s", want, out)
 	}
-	if strings.Contains(out, "\x1b") {
-		t.Errorf("plain drift preview has ANSI:\n%s", out)
-	}
-	if len(fr.Calls) != 1 {
-		t.Fatalf("want 1 tofu call, got %+v", fr.Calls)
-	}
-	call := fr.Calls[0]
-	if got := strings.Join(call.Args, " "); got != "-chdir=infra plan -no-color -input=false -lock=false" {
-		t.Errorf("unexpected tofu args %q", got)
-	}
-	if call.Dir != root || !slices.Contains(call.Env, "HCLOUD_TOKEN="+planToken) {
-		t.Errorf("unexpected dir/env %q %v", call.Dir, len(call.Env))
-	}
-	if strings.Contains(out, planToken) {
-		t.Error("token printed")
-	}
-	if _, err := os.Stat(filepath.Join(root, "infra", "tfplan")); err == nil {
-		t.Error("drift preview saved a plan")
+	if strings.Contains(out, "\x1b") || strings.Contains(out, planToken) {
+		t.Errorf("plain drift output has ANSI or token:\n%s", out)
 	}
 }
 
-func TestPlanDriftPreviewWithoutCredentials(t *testing.T) {
-	root, prov, fr := driftSetup(t)
-	prov.credErr = errors.New("HCLOUD_TOKEN is not set")
-
-	out, err := execPlan(t, root)
+func TestPlanNoDriftSection(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	out, err := execPlan(t, root, "--cloud", "hetzner")
 	if err != nil {
 		t.Fatalf("plan: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "HCLOUD_TOKEN is not set") {
-		t.Errorf("missing credentials warning in:\n%s", out)
-	}
-	if len(fr.Calls) != 0 {
-		t.Errorf("tofu ran without credentials: %+v", fr.Calls)
+	if strings.Contains(out, "\ndrift\n") {
+		t.Errorf("drift section without drift:\n%s", out)
 	}
 }
 
 func TestPlanPreflightWarnings(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	engine.PreflightRunner = &engine.FakeRunner{Errors: map[string]error{"gh auth": errors.New("exit 1")}}
 
 	out, err := execPlan(t, root, "--cloud", "hetzner")
@@ -405,14 +363,14 @@ func TestPlanPreflightWarnings(t *testing.T) {
 }
 
 func TestPlanRejectsBadPort(t *testing.T) {
-	root, _, _ := planEnv(t, "go-app")
+	root, _ := planEnv(t, "go-app")
 	if out, err := execPlan(t, root, "--cloud", "hetzner", "--port", "70000"); err == nil {
 		t.Fatalf("want error for port 70000:\n%s", out)
 	}
 }
 
 func TestDefaultPort(t *testing.T) {
-	root, _, _ := planEnv(t, "node-app")
+	root, _ := planEnv(t, "node-app")
 	out, err := execPlan(t, root, "--cloud", "hetzner")
 	if err != nil {
 		t.Fatalf("plan: %v\n%s", err, out)

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
@@ -21,19 +20,13 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/module"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/deploy"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
-	"github.com/jean-baptisteAZAN/vauban/internal/tools"
 	"github.com/jean-baptisteAZAN/vauban/internal/ui"
 )
-
-// planRunner runs the read-only drift preview. Tests replace it.
-var planRunner engine.Runner = engine.ExecRunner{}
 
 // interactive reports whether prompts are possible (stdin and stdout TTYs).
 var interactive = func() bool {
 	return term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd())
 }
-
-const driftTimeout = 3 * time.Minute
 
 var cloudLabels = map[string]string{"scaleway": "Scaleway", "digitalocean": "DigitalOcean", "hetzner": "Hetzner"}
 
@@ -41,8 +34,10 @@ func newPlanCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "Choose a cloud and show every file and command apply would run",
-		Args:  cobra.NoArgs,
-		RunE:  runPlan,
+		Long: "Choose a cloud and show every file and command apply would run.\n\n" +
+			"Uses vauban.yaml when it exists (--reconfigure asks again); flags override vauban.yaml.",
+		Args: cobra.NoArgs,
+		RunE: runPlan,
 	}
 	f := cmd.Flags()
 	f.String("cloud", "", "cloud provider: scaleway, digitalocean or hetzner")
@@ -55,10 +50,6 @@ func newPlanCmd() *cobra.Command {
 }
 
 func runPlan(cmd *cobra.Command, _ []string) error {
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	dir, _ := cmd.Flags().GetString("dir")
 	force, _ := cmd.Flags().GetBool("force")
 	root, err := filepath.Abs(dir)
@@ -81,7 +72,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	w := cmd.OutOrStdout()
 	writeConfigSummary(w, p, c)
 	ui.RenderPlan(w, pl.items(root, force))
-	driftPreview(ctx, w, root, c, pl.infraStale)
+	writeDrift(w, pl.st, c, pl.infraStale)
 	if err := engine.Preflight(pl.p, c, pl.mods); err != nil {
 		ui.Warnings(w, "before apply:", strings.Split(err.Error(), "\n"))
 	}
@@ -320,38 +311,23 @@ func writeConfigSummary(w io.Writer, p *detect.Project, c *config.Config) {
 	ui.Row(w, "port", fmt.Sprint(c.AppPort))
 }
 
-// driftPreview shows a read-only tofu plan when vauban.yaml no longer
-// matches the applied infra. It never fails the plan.
-func driftPreview(ctx context.Context, w io.Writer, root string, c *config.Config, stale []string) {
+// writeDrift reports that vauban.yaml no longer matches the applied infra.
+// The exact tofu plan is only meaningful once main.tf is re-rendered, so
+// apply shows it.
+func writeDrift(w io.Writer, st *engine.State, c *config.Config, stale []string) {
 	if len(stale) == 0 {
 		return
 	}
-	if _, err := os.Stat(filepath.Join(root, "infra", "main.tf")); err != nil {
-		return
+	applied := orDefault(st.Outputs["infra_fingerprint"], "not applied")
+	ui.Drift(w, "infra config changed: "+applied+" → "+infraFingerprint(c))
+}
+
+// infraFingerprint is cloud/region/size with provider defaults filled in,
+// as the infra module records it.
+func infraFingerprint(c *config.Config) string {
+	region, size := c.Region, c.Size
+	if prov, err := cloud.Get(c.Cloud); err == nil {
+		region, size = orDefault(region, prov.DefaultRegion()), orDefault(size, prov.DefaultSize())
 	}
-	prov, err := cloud.Get(c.Cloud)
-	if err != nil {
-		return
-	}
-	creds, err := prov.CredentialsEnv()
-	if err != nil {
-		fmt.Fprintln(w)
-		ui.Warning(w, "drift preview skipped: "+err.Error())
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, driftTimeout)
-	defer cancel()
-	tofu, _ := tools.Tofu()
-	out, err := planRunner.Run(ctx, engine.Cmd{
-		Dir:  root,
-		Name: tofu,
-		Args: []string{"-chdir=infra", "plan", "-no-color", "-input=false", "-lock=false"},
-		Env:  creds,
-	})
-	if err != nil {
-		fmt.Fprintln(w)
-		ui.Warning(w, "drift preview failed: "+err.Error())
-		return
-	}
-	ui.Drift(w, string(out))
+	return c.Cloud + "/" + region + "/" + size
 }
