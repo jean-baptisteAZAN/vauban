@@ -22,7 +22,7 @@ func NewRoot(version string) *cobra.Command {
 	pf.String("dir", ".", "project directory")
 	pf.Bool("yes", false, "accept defaults without prompting")
 	pf.Bool("force", false, "overwrite existing files")
-	root.AddCommand(newVersionCmd(version))
+	root.AddCommand(newVersionCmd(version), newPlanCmd())
 	return root
 }
 
@@ -30,3 +30,12 @@ func NewRoot(version string) *cobra.Command {
 func Execute(ctx context.Context, version string) error {
 	return fang.Execute(ctx, NewRoot(version), fang.WithVersion(version))
 }
+
+// ExitError makes the process exit with Code after fang has printed Err.
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitError) Error() string { return e.Err.Error() }
+func (e *ExitError) Unwrap() error { return e.Err }
