@@ -26,6 +26,7 @@ func destroyEnv(t *testing.T) (string, *engine.FakeRunner) {
 	writeFile(t, root, "Dockerfile", "FROM scratch\n")
 	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
 	writeFile(t, root, "infra/terraform.tfstate", "{}\n")
+	writeFile(t, root, "infra/.terraform/terraform.tfstate", "{}\n") // tofu init already ran
 	home, _ := os.UserHomeDir()
 	saveState(t, root, &engine.State{
 		Done:    map[string]bool{"file:Dockerfile": true, "infra:main-tf": true, "infra:apply": true},
@@ -239,5 +240,31 @@ func TestDestroyInterruptedDuringSecrets(t *testing.T) {
 	wantExit(t, err, 130, "interrupted — state kept; rerun `vauban destroy` to finish", out)
 	if !exists(statePath(root)) {
 		t.Error("state.json removed after interrupt")
+	}
+}
+
+// A fresh checkout has no infra/.terraform: destroy runs tofu init first.
+func TestDestroyInitsWhenTerraformDirMissing(t *testing.T) {
+	root, fr := destroyEnv(t)
+	if err := os.RemoveAll(filepath.Join(root, "infra", ".terraform")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	if err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	const initCmd = "tofu -chdir=infra init -input=false"
+	calls := callLines(fr)
+	if len(calls) < 2 || calls[0] != initCmd || calls[1] != tofuDestroyCmd {
+		t.Fatalf("calls = %q, want init then destroy", calls)
+	}
+	if init := fr.Calls[0]; init.Dir != root || !slices.Contains(init.Env, "HCLOUD_TOKEN="+planToken) {
+		t.Errorf("tofu init dir/env = %q %q", init.Dir, init.Env)
+	}
+	if !strings.Contains(out, "  - $ "+initCmd+"\n") {
+		t.Errorf("init not announced before confirmation:\n%s", out)
+	}
+	if strings.Contains(out, planToken) {
+		t.Errorf("token in output:\n%s", out)
 	}
 }

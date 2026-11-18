@@ -311,6 +311,10 @@ func (pl *planned) items(root string, force bool) []ui.PlanGroup {
 // (engine.KindWrite or engine.KindCommand).
 type kinded interface{ Kind() string }
 
+// keeper is implemented by steps that may find their work already present
+// (Kept returns the plan line then, else "").
+type keeper interface{ Kept() string }
+
 // planItem classifies a step by its type: done, secret, file (write or skip),
 // command, or other.
 func planItem(s engine.Step, root string, st *engine.State, overwrite bool) ui.PlanItem {
@@ -323,6 +327,11 @@ func planItem(s engine.Step, root string, st *engine.State, overwrite bool) ui.P
 			return ui.PlanItem{Kind: ui.PlanSkip, Text: path}
 		}
 		return ui.PlanItem{Kind: ui.PlanWrite, Text: path}
+	}
+	if k, ok := s.(keeper); ok {
+		if text := k.Kept(); text != "" {
+			return ui.PlanItem{Kind: ui.PlanKept, Text: text}
+		}
 	}
 	switch s := s.(type) {
 	case engine.SetSecret:
@@ -352,8 +361,9 @@ func writeConfigSummary(w io.Writer, p *detect.Project, c *config.Config) {
 }
 
 // writeDrift reports why infra steps run again: vauban.yaml no longer
-// matches the applied infra (drift), or the managed main.tf on disk was
-// rendered for another config with nothing applied (kept after destroy).
+// matches the applied infra (drift), a first apply was interrupted (resume),
+// or the managed main.tf on disk was rendered for another config with
+// nothing applied (kept after destroy).
 // The exact tofu plan is only meaningful once main.tf is re-rendered, so
 // apply shows it.
 func writeDrift(w io.Writer, root string, st *engine.State, c *config.Config, stale []string) {
@@ -363,6 +373,10 @@ func writeDrift(w io.Writer, root string, st *engine.State, c *config.Config, st
 	want := infraFingerprint(c)
 	if applied := st.Outputs["infra_fingerprint"]; applied != "" {
 		ui.Drift(w, "infra config changed: "+applied+" → "+want)
+		return
+	}
+	if st.Outputs["rendered_fingerprint"] != "" { // first apply, interrupted
+		ui.Section(w, "resume", "resuming an unfinished apply")
 		return
 	}
 	if disk := infra.RenderedFingerprint(root); disk != "" && disk != want {

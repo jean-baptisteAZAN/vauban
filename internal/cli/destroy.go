@@ -71,6 +71,11 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	managed := infra.IsManaged(root)
 	tofu, _ := tools.Tofu()
 	tofuArgs := []string{"-chdir=infra", "destroy", "-auto-approve", "-input=false"}
+	// A fresh checkout has no providers installed: init before destroying.
+	var initArgs []string
+	if _, err := os.Stat(filepath.Join(root, "infra", ".terraform")); managed && errors.Is(err, fs.ErrNotExist) {
+		initArgs = []string{"-chdir=infra", "init", "-input=false"}
+	}
 	tty := interactive()
 	ctx, sig := watchSignals(cmd.Context(), cmd.ErrOrStderr(), tty)
 	defer sig.stop()
@@ -86,6 +91,9 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "destroy will:")
 	if managed {
+		if initArgs != nil {
+			fmt.Fprintf(w, "  - $ %s %s\n", tofu, strings.Join(initArgs, " "))
+		}
 		fmt.Fprintf(w, "  - $ %s %s  (deletes the %s server and firewall)\n", tofu, strings.Join(tofuArgs, " "), c.Cloud)
 	} else {
 		fmt.Fprintln(w, "  - no vauban-managed infra/main.tf: no cloud resources to destroy")
@@ -131,6 +139,15 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 			return &ExitError{Code: 130, Err: errDestroyInterrupted}
 		}
 		return err
+	}
+	if managed && initArgs != nil {
+		const id, desc = "infra:init", "install providers (tofu init)"
+		prog.Update(id, desc, engine.PhaseStart, nil)
+		if _, err := run.Run(ctx, engine.Cmd{Dir: root, Name: tofu, Args: initArgs, Env: creds}); err != nil {
+			prog.Update(id, desc, engine.PhaseFail, err)
+			return interrupted(fmt.Errorf("tofu init failed — nothing was destroyed: %w", err))
+		}
+		prog.Update(id, desc, engine.PhaseDone, nil)
 	}
 	if managed {
 		const id, desc = "infra:destroy", "destroy cloud resources (tofu destroy)"

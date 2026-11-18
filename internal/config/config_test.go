@@ -70,3 +70,24 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDomain(t *testing.T) {
+	for _, d := range []string{"example.com", "app.example.co.uk", "xn--bcher-kva.example", "a-b.c1.io", "1-2-3-4.sslip.io"} {
+		c := valid()
+		c.Domain = d
+		if err := c.Validate(); err != nil {
+			t.Errorf("%q: %v", d, err)
+		}
+	}
+	for _, d := range []string{
+		"localhost", "example", "https://example.com", "example.com/", "-a.example.com", "a-.example.com",
+		"a..example.com", ".example.com", "example.com.", "ex ample.com", "exa_mple.com", "*.example.com",
+		"example.com:443", strings.Repeat("a", 64) + ".com", strings.Repeat("a.", 127) + "com",
+	} {
+		c := valid()
+		c.Domain = d
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "domain") {
+			t.Errorf("%q: got %v, want a domain error", d, err)
+		}
+	}
+}

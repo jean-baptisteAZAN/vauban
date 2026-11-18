@@ -10,7 +10,7 @@ import (
 var (
 	goDirective    = regexp.MustCompile(`(?m)^go\s+(\d+(?:\.\d+)*)`)
 	requiresPython = regexp.MustCompile(`(?m)^\s*requires-python\s*=\s*["']([^"']+)["']`)
-	versionNumber  = regexp.MustCompile(`\d+(?:\.\d+)*`)
+	exactVersion   = regexp.MustCompile(`^\d+(?:\.\d+)*$`)
 )
 
 func detectStack(p *Project) {
@@ -60,11 +60,9 @@ func detectNode(p *Project) {
 	default:
 		p.PackageManager = "npm"
 	}
-	if v := pkg.Engines["node"]; v != "" {
-		p.LangVersion = versionNumber.FindString(v)
-	}
+	p.LangVersion = pinned(pkg.Engines["node"])
 	if p.LangVersion == "" {
-		p.LangVersion = versionNumber.FindString(readFile(filepath.Join(r, ".nvmrc")))
+		p.LangVersion = pinned(readFile(filepath.Join(r, ".nvmrc")))
 	}
 }
 
@@ -81,9 +79,23 @@ func detectPython(p *Project) {
 		p.PackageManager = "pip"
 	}
 	if m := requiresPython.FindStringSubmatch(pyproject); m != nil {
-		p.LangVersion = versionNumber.FindString(m[1])
+		p.LangVersion = pinned(m[1])
 	}
 	if p.LangVersion == "" {
-		p.LangVersion = versionNumber.FindString(readFile(filepath.Join(r, ".python-version")))
+		p.LangVersion = pinned(readFile(filepath.Join(r, ".python-version")))
 	}
+}
+
+// pinned returns the version an exact pin names ("20", "v20.11.1",
+// "==3.12"), or "" for a range (">=20", "^20", "~=3.11", "18 || 20",
+// "20.x", "lts/*"...), so callers use their default, latest LTS/stable,
+// rather than a range's lower bound.
+func pinned(spec string) string {
+	v := strings.TrimSpace(spec)
+	v = strings.TrimPrefix(strings.TrimPrefix(v, "=="), "=")
+	v = strings.TrimPrefix(v, "v")
+	if exactVersion.MatchString(v) {
+		return v
+	}
+	return ""
 }

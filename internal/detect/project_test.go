@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -18,12 +19,14 @@ func TestScanFixtures(t *testing.T) {
 			}
 		}},
 		{"node-app", func(t *testing.T, p *Project) {
-			if p.Stack != "node" || p.PackageManager != "pnpm" || p.Scripts["lint"] == "" || !p.HasTests {
+			// engines.node ">=20" is a range: use the default version.
+			if p.Stack != "node" || p.PackageManager != "pnpm" || p.Scripts["lint"] == "" || !p.HasTests || p.LangVersion != "" {
 				t.Errorf("got %+v", p)
 			}
 		}},
 		{"python-app", func(t *testing.T, p *Project) {
-			if p.Stack != "python" || p.PackageManager != "uv" || !p.HasTests || p.LangVersion != "3.12" {
+			// requires-python ">=3.12" is a range: use the default version.
+			if p.Stack != "python" || p.PackageManager != "uv" || !p.HasTests || p.LangVersion != "" {
 				t.Errorf("got %+v", p)
 			}
 		}},
@@ -113,6 +116,51 @@ func TestNodePlaceholderTestScript(t *testing.T) {
 		}
 		if p.HasTests != want {
 			t.Errorf("test script %q: HasTests = %v, want %v", script, p.HasTests, want)
+		}
+	}
+}
+
+// Version ranges fall back to the default (latest LTS/stable); exact pins are kept.
+func TestLangVersionRangesUseDefault(t *testing.T) {
+	for spec, want := range map[string]string{
+		"20": "20", "20.11.1": "20.11.1", "v22": "22", "=20.1": "20.1",
+		">=20": "", "^20.1": "", "~20": "", "18 || 20": "", "<23": "", "20.x": "", "*": "",
+	} {
+		dir := t.TempDir()
+		writeTemp(t, dir, "package.json", `{"engines":{"node":"`+spec+`"}}`)
+		p, err := Scan(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.LangVersion != want {
+			t.Errorf("engines.node %q: LangVersion = %q, want %q", spec, p.LangVersion, want)
+		}
+	}
+	for spec, want := range map[string]string{
+		"3.12": "3.12", "==3.12.1": "3.12.1",
+		">=3.11": "", ">=3.9,<4": "", "~=3.11": "", "^3.11": "", "3.12.*": "",
+	} {
+		dir := t.TempDir()
+		writeTemp(t, dir, "pyproject.toml", "[project]\nrequires-python = \""+spec+"\"\n")
+		p, err := Scan(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.LangVersion != want {
+			t.Errorf("requires-python %q: LangVersion = %q, want %q", spec, p.LangVersion, want)
+		}
+	}
+	for file, content := range map[string]string{".nvmrc": "20.11.1\n", ".python-version": "3.12.4\n"} {
+		dir := t.TempDir()
+		manifest := map[string]string{".nvmrc": "package.json", ".python-version": "pyproject.toml"}[file]
+		writeTemp(t, dir, manifest, map[string]string{"package.json": "{}", "pyproject.toml": "[project]\n"}[manifest])
+		writeTemp(t, dir, file, content)
+		p, err := Scan(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := strings.TrimSpace(content); p.LangVersion != want {
+			t.Errorf("%s: LangVersion = %q, want %q", file, p.LangVersion, want)
 		}
 	}
 }

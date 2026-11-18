@@ -16,6 +16,7 @@ const (
 	PlanCommand                 // a command to run; Text is the command line, Note its label
 	PlanSecret                  // a GitHub secret to set; Text is its description
 	PlanOther                   // any other step; Text is its description
+	PlanKept                    // work already present (not a file); Text says what
 )
 
 // PlanItem is one line of plan output.
@@ -58,7 +59,11 @@ func RenderPlan(w io.Writer, groups []PlanGroup) {
 		{PlanWrite, "to write"}, {PlanCommand, "to run"}, {PlanSecret, "secrets"},
 		{PlanOther, "other"}, {PlanSkip, "kept"}, {PlanDone, "done"},
 	} {
-		if n := counts[c.kind]; n > 0 {
+		n := counts[c.kind]
+		if c.kind == PlanSkip {
+			n += counts[PlanKept]
+		}
+		if n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, c.word))
 		}
 	}
@@ -83,8 +88,11 @@ func planLine(it PlanItem) string {
 			return OK.Render("✓") + " " + Muted.Render(it.Text+" (done)")
 		}
 		return "✓ " + it.Text + " (done)"
-	case PlanSkip:
+	case PlanSkip, PlanKept:
 		line := "· skip " + it.Text + " (exists)"
+		if it.Kind == PlanKept {
+			line = "· " + it.Text
+		}
 		if styled {
 			return Muted.Render(line)
 		}

@@ -48,7 +48,7 @@ Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--
 | `.github/workflows/deploy.yml` | Builds and pushes the image to GHCR, then deploys over SSH |
 | GitHub secrets | `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_DOMAIN`, set through `gh` |
 
-Existing files are never overwritten: they are reported as `skip (exists)` unless you pass `--force`. Every file and command appears in `vauban plan` before `apply` does it.
+Existing files are never overwritten: they are reported as `skip (exists)` unless you pass `--force`. Every file and command appears in `vauban plan` before `apply` does it. Changing `app_port` later therefore needs `vauban apply --force` to regenerate the deploy files; when only files, the domain or secrets change, `apply` ends with `push to redeploy`.
 
 Without a domain, HTTPS works out of the box on `<ip>.sslip.io`. With one (`--domain`), `apply` prints the DNS records to create once the server exists: an A record to its IPv4 and, when it has one, an AAAA record to its IPv6. App secrets: add a GitHub secret named `APP_<NAME>` and the deploy job writes `<NAME>` into `~/app/.env` on the VM (mode 600).
 
@@ -62,7 +62,9 @@ Stacks: **Go**, **Node/TypeScript**, **Python**. Your app must listen on `0.0.0.
 | DigitalOcean | `DIGITALOCEAN_TOKEN`, else the `doctl` config |
 | Hetzner | `HCLOUD_TOKEN`, else `~/.config/hcloud/cli.toml` |
 
-GitHub access comes from `gh auth login`. Vauban stores no credentials itself.
+Node: the `start` script must not call pnpm, yarn or bun: the image runs `npm start`.
+
+GitHub access comes from `gh auth login`. Vauban stores no credentials itself. Tip: the `DEPLOY_*` secrets are repository secrets; to restrict them to deploys from `main`, move them to a GitHub Environment with a branch protection rule and set `environment:` on the deploy job.
 
 ## Security defaults
 

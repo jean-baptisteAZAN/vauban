@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -68,5 +70,25 @@ func (c *Config) Validate() error {
 	if c.AppPort < 1 || c.AppPort > 65535 {
 		errs = append(errs, fmt.Errorf("app_port %d out of range 1-65535", c.AppPort))
 	}
+	if c.Domain != "" && !validHostname(c.Domain) {
+		errs = append(errs, fmt.Errorf("domain %q is not a valid hostname (e.g. app.example.com)", c.Domain))
+	}
 	return errors.Join(errs...)
+}
+
+var hostLabel = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
+// validHostname reports whether h is an RFC 1123 hostname with at least
+// one dot: labels of 1-63 letters, digits and inner hyphens, 253 bytes max.
+func validHostname(h string) bool {
+	labels := strings.Split(h, ".")
+	if len(h) > 253 || len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if !hostLabel.MatchString(l) {
+			return false
+		}
+	}
+	return true
 }

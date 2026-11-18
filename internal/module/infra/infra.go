@@ -340,6 +340,15 @@ func (d deployKey) Describe() string {
 	return `deploy key: $ ssh-keygen -t ed25519 -N "" -C vauban-` + d.project + " -f " + d.path
 }
 
+// Kept tells plan the key pair already exists (ssh-keygen will not run),
+// or returns "".
+func (d deployKey) Kept() string {
+	if _, err := os.Stat(d.path); err != nil {
+		return ""
+	}
+	return "deploy key exists " + d.path
+}
+
 func (d deployKey) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, error) {
 	if _, err := os.Stat(d.path); errors.Is(err, fs.ErrNotExist) {
 		if err := os.MkdirAll(filepath.Dir(d.path), 0o700); err != nil {

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -159,5 +160,19 @@ func TestIdentity(t *testing.T) {
 	m := New()
 	if m.ID() != "container" || m.Title() != "container" || len(m.Requires()) != 0 {
 		t.Error("bad identity")
+	}
+}
+
+// Secrets and Terraform state in any subdirectory stay out of the build context.
+func TestDockerignoreNested(t *testing.T) {
+	steps, err := New().Plan(scan(t, "go-app"), &config.Config{AppPort: 8080})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(steps[1].(engine.WriteFile).Content), "\n")
+	for _, want := range []string{"**/*.tfstate*", "**/.env", "**/.env.*"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf("missing %q in .dockerignore:\n%s", want, strings.Join(lines, "\n"))
+		}
 	}
 }

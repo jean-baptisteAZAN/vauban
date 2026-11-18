@@ -548,3 +548,47 @@ func TestPlanCustomDomainDNSHint(t *testing.T) {
 		t.Errorf("DNS hint without a domain:\n%s", out)
 	}
 }
+
+// An interrupted first apply (rendered, never applied) is a resume, not drift.
+func TestPlanResumingUnfinishedApply(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+	saveState(t, root, &engine.State{
+		Done:    map[string]bool{"infra:deploy-key": true, "infra:main-tf": true},
+		Outputs: engine.Outputs{"rendered_fingerprint": "hetzner/nbg1/cx23"},
+	})
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "  resuming an unfinished apply\n") {
+		t.Errorf("missing resume note in:\n%s", out)
+	}
+	if strings.Contains(out, "\ndrift\n") || strings.Contains(out, "destroying or replacing") {
+		t.Errorf("resume reported as drift:\n%s", out)
+	}
+}
+
+func TestPlanDeployKeyExists(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	home, _ := os.UserHomeDir()
+	key := filepath.Join(home, ".ssh", "vauban_shop_ed25519")
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "$ ssh-keygen") || strings.Contains(out, "deploy key exists") {
+		t.Errorf("want ssh-keygen without a key:\n%s", out)
+	}
+	writeFile(t, "/", key, "PRIVATE KEY\n")
+	writeFile(t, "/", key+".pub", "ssh-ed25519 AAAA vauban-shop\n")
+	if out, err = execPlan(t, root); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "  · deploy key exists "+key+"\n") || strings.Contains(out, "$ ssh-keygen") {
+		t.Errorf("want existing deploy key line in:\n%s", out)
+	}
+	if strings.Contains(out, "PRIVATE KEY") {
+		t.Errorf("key material in output:\n%s", out)
+	}
+}
