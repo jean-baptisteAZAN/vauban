@@ -174,10 +174,10 @@ func fakeDOAPI(t *testing.T) *digitalocean {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v2/account", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"account":{"status":"active"}}`))
+		_, _ = w.Write([]byte(`{"account":{"status":"active"}}`))
 	})
 	mux.HandleFunc("/v2/regions", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"regions":[
+		_, _ = w.Write([]byte(`{"regions":[
 			{"slug":"nyc3","name":"New York 3","available":true},
 			{"slug":"fra1","name":"Frankfurt 1","available":true},
 			{"slug":"nyc2","name":"New York 2","available":false}
@@ -185,14 +185,14 @@ func fakeDOAPI(t *testing.T) *digitalocean {
 	})
 	mux.HandleFunc("/v2/sizes", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("page") != "2" {
-			w.Write([]byte(`{"sizes":[
+			_, _ = w.Write([]byte(`{"sizes":[
 				{"slug":"s-2vcpu-4gb","memory":4096,"vcpus":2,"price_monthly":24,"available":true,"regions":["fra1","nyc3"]},
 				{"slug":"s-1vcpu-1gb","memory":1024,"vcpus":1,"price_monthly":6,"available":true,"regions":["fra1","nyc3"]},
 				{"slug":"s-1vcpu-512mb-10gb","memory":512,"vcpus":1,"price_monthly":4,"available":true,"regions":["nyc3"]}
 			],"links":{"pages":{"next":"http://x/v2/sizes?page=2","last":"http://x/v2/sizes?page=2"}}}`))
 			return
 		}
-		w.Write([]byte(`{"sizes":[
+		_, _ = w.Write([]byte(`{"sizes":[
 			{"slug":"s-1vcpu-2gb","memory":2048,"vcpus":1,"price_monthly":12.5,"available":true,"regions":["fra1"]},
 			{"slug":"s-4vcpu-8gb","memory":8192,"vcpus":4,"price_monthly":48,"available":false,"regions":["fra1"]}
 		],"links":{"pages":{"first":"http://x/v2/sizes?page=1","prev":"http://x/v2/sizes?page=1"}}}`))
@@ -201,7 +201,7 @@ func fakeDOAPI(t *testing.T) *digitalocean {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Header.Get("Authorization") != "Bearer goodtoken" {
 			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"id":"unauthorized","message":"Unable to authenticate you"}`))
+			_, _ = w.Write([]byte(`{"id":"unauthorized","message":"Unable to authenticate you"}`))
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -276,7 +276,7 @@ func TestBearerClientScopedToAPIHost(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	want := []string{"api:Bearer tok", "other:"}
 	if !reflect.DeepEqual(got, want) {

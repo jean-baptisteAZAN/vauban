@@ -33,7 +33,7 @@ func detectGit(p *Project) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only file, nothing to flush
 	inOrigin := false
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {

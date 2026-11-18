@@ -183,7 +183,7 @@ func TestPythonVariants(t *testing.T) {
 	}
 	// ruff and pytest declared: plain uv run
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[dependency-groups]\ndev = [\"ruff\", \"pytest\"]\n"), 0o644)
+	writeFile(t, filepath.Join(dir, "pyproject.toml"), []byte("[dependency-groups]\ndev = [\"ruff\", \"pytest\"]\n"), 0o644)
 	q := &detect.Project{Root: dir, Stack: "python", PackageManager: "uv", HasTests: true}
 	got = workflow(t, plan(t, q))
 	parse(t, got)
@@ -191,7 +191,7 @@ func TestPythonVariants(t *testing.T) {
 		t.Errorf("uv deps:\n%s", got)
 	}
 	// pip fallback
-	os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask\n"), 0o644)
+	writeFile(t, filepath.Join(dir, "requirements.txt"), []byte("flask\n"), 0o644)
 	q.PackageManager = "pip"
 	got = workflow(t, plan(t, q))
 	parse(t, got)
@@ -234,9 +234,9 @@ func TestNodePackageManagers(t *testing.T) {
 		{pm: "bun", lock: "bun.lock", cache: "", extra: "oven-sh/setup-bun@v2", notWant: "npm install -g"},
 	} {
 		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"scripts":{"lint":"x","test":"y"}`+tc.pkg+`}`), 0o644)
+		writeFile(t, filepath.Join(dir, "package.json"), []byte(`{"scripts":{"lint":"x","test":"y"}`+tc.pkg+`}`), 0o644)
 		if tc.lock != "" {
-			os.WriteFile(filepath.Join(dir, tc.lock), nil, 0o644)
+			writeFile(t, filepath.Join(dir, tc.lock), nil, 0o644)
 		}
 		p := &detect.Project{Root: dir, Stack: "node", PackageManager: tc.pm, HasTests: true,
 			Scripts: map[string]string{"lint": "x", "test": "y"}}
@@ -257,5 +257,12 @@ func TestNodePackageManagers(t *testing.T) {
 		if tc.notWant != "" && strings.Contains(got, tc.notWant) {
 			t.Errorf("%s: unexpected %q", tc.pm, tc.notWant)
 		}
+	}
+}
+
+func writeFile(t *testing.T, name string, data []byte, perm os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(name, data, perm); err != nil {
+		t.Fatal(err)
 	}
 }

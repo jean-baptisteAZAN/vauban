@@ -233,10 +233,10 @@ func fakeSCWAPI(t *testing.T) *scaleway {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/instance/v1/zones/fr-par-1/servers", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"servers":[]}`))
+		_, _ = w.Write([]byte(`{"servers":[]}`))
 	})
 	mux.HandleFunc("/instance/v1/zones/fr-par-1/products/servers/availability", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"total_count":6,"servers":{
+		_, _ = w.Write([]byte(`{"total_count":6,"servers":{
 			"PLAY2-PICO":{"availability":"available"},
 			"PLAY2-NANO":{"availability":"scarce"},
 			"PRO2-XXS":{"availability":"available"},
@@ -246,7 +246,7 @@ func fakeSCWAPI(t *testing.T) *scaleway {
 		}}`))
 	})
 	mux.HandleFunc("/instance/v1/zones/fr-par-1/products/servers", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"total_count":7,"servers":{
+		_, _ = w.Write([]byte(`{"total_count":7,"servers":{
 			"PRO2-XXS":{"ncpus":2,"ram":8589934592,"arch":"x86_64","hourly_price":0.0168,"monthly_price":12.26},
 			"PLAY2-NANO":{"ncpus":2,"ram":4294967296,"arch":"x86_64","hourly_price":0.0103,"monthly_price":7.5},
 			"PLAY2-PICO":{"ncpus":1,"ram":2147483648,"arch":"x86_64","hourly_price":0.0055},
@@ -260,7 +260,7 @@ func fakeSCWAPI(t *testing.T) *scaleway {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Header.Get("X-Auth-Token") != testSCWSecret {
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"type":"denied_authentication","message":"authentication required"}`))
+			_, _ = w.Write([]byte(`{"type":"denied_authentication","message":"authentication required"}`))
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -371,7 +371,9 @@ func TestScalewayConfigPermissiveWarnsOnStderrOnly(t *testing.T) {
 	os.Stdout = w
 	got, cerr := (&scaleway{}).CredentialsEnv()
 	os.Stdout = oldOut
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	out, _ := io.ReadAll(r)
 
 	if cerr != nil || len(got) != 3 {

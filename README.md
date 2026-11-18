@@ -27,13 +27,13 @@ Vauban uses `gh`, `tofu` (or `terraform`), `docker` and `ssh-keygen` when presen
 ## Quickstart
 
 ```sh
-vauban          # report: stack detected, what is missing, which tools are installed
-vauban plan     # pick cloud/region/size, see every file and command; changes nothing
+vauban doctor   # report: stack detected, what is missing, which tools are installed (bare `vauban` is an alias)
+vauban plan     # pick cloud/region/size, see every file and command; only saves vauban.yaml
 vauban apply    # confirm, then write files, create the VM, push GitHub secrets
 git add -A && git commit -m "ship it" && git push   # vauban never pushes for you
 ```
 
-`plan` saves your answers to `vauban.yaml` (commit it). After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` (and `--cloud` if there is no `vauban.yaml`).
+`plan` saves your answers to `vauban.yaml` (commit it). After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` to `apply` (and `--cloud` if there is no `vauban.yaml`); `destroy` takes `--confirm <project>` instead.
 
 Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--domain`, `--port`, `--reconfigure`, `--force`, `--dir <path>`.
 
@@ -50,7 +50,7 @@ Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--
 
 Existing files are never overwritten: they are reported as `skip (exists)` unless you pass `--force`. Every file and command appears in `vauban plan` before `apply` does it.
 
-Without a domain, HTTPS works out of the box on `<ip>.sslip.io`. With one, `plan` prints the DNS A record to create. App secrets: add a GitHub secret named `APP_<NAME>` and the deploy job writes `<NAME>` into `deploy/.env` on the VM (mode 0600).
+Without a domain, HTTPS works out of the box on `<ip>.sslip.io`. With one, `plan` prints the DNS A record to create. App secrets: add a GitHub secret named `APP_<NAME>` and the deploy job writes `<NAME>` into `~/app/.env` on the VM (mode 600).
 
 ## Supported clouds and stacks
 
@@ -66,11 +66,11 @@ GitHub access comes from `gh auth login`. Vauban stores no credentials itself.
 
 ## Security defaults
 
-- Debian stable VM, non-root `deploy` user, `PermitRootLogin no`, `PasswordAuthentication no`.
-- Ports 22, 80 and 443 only, enforced twice: `ufw` on the VM and the cloud firewall.
+- Debian 13 VM, non-root `deploy` user, `PermitRootLogin no`, `PasswordAuthentication no`.
+- The cloud firewall is the perimeter: tcp 22, 80, 443 and udp 443 (HTTP/3) only. `ufw` on the VM is defense in depth for host services, since Docker-published ports bypass it.
 - Unattended security upgrades with a night-time reboot, Docker log rotation, a daily image prune.
 - The app is not published on the host; only Caddy can reach it.
-- Deploys only run after CI succeeds on a push to this repository: pull requests and forks cannot deploy.
+- When a CI workflow exists, deploys only run after it succeeds on a push to this repository (pull requests and forks cannot deploy); without one, deploy runs on every push to `main`.
 - Images are deployed by immutable commit sha, never `latest`.
 - Changes that destroy or replace cloud resources need the project name typed (or `--force`).
 - No secret value is printed, logged, or written to the repo or to `.vauban/state.json`. The deploy key lives at `~/.ssh/vauban_<project>_ed25519` (0600).
@@ -83,7 +83,7 @@ GitHub access comes from `gh auth login`. Vauban stores no credentials itself.
 |---|---|
 | 0 | Success |
 | 1 | Failure, including a failed preflight (nothing was applied) |
-| 2 | Usage problem: no terminal and no `--yes` / `--confirm`, or no `vauban.yaml` and no `--cloud` |
+| 2 | Usage problem: `apply` without a terminal and without `--yes`; `destroy` without a terminal and without `--confirm <project>` (or a mismatched name); `plan` with no `vauban.yaml` and no `--cloud` outside a terminal |
 | 3 | Destructive infra change not confirmed (nothing was applied) |
 | 130 | Interrupted (Ctrl-C); state is kept, rerun to resume |
 
@@ -111,7 +111,7 @@ Measured on an Apple Silicon Mac with `go build -trimpath -ldflags "-s -w"`:
 | | Result | Target |
 |---|---|---|
 | Binary size | 17.4 MB (17,415,346 bytes) | < 20 MB |
-| `vauban` (doctor) startup, `testdata/go-app`, median of 20 runs | 5.3 ms (min 5.2, max 6.1) | < 50 ms |
+| `vauban doctor` startup, `testdata/go-app`, median of 20 runs | 5.3 ms (min 5.2, max 6.1) | < 50 ms |
 
 ## License
 

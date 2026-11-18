@@ -8,12 +8,17 @@ import (
 
 func doctorOut(t *testing.T, dir string) string {
 	t.Helper()
+	return doctorOutArgs(t, "--dir", dir)
+}
+
+func doctorOutArgs(t *testing.T, args ...string) string {
+	t.Helper()
 	t.Setenv("NO_COLOR", "1")
 	root := NewRoot("dev")
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
-	root.SetArgs([]string{"--dir", dir})
+	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -43,5 +48,12 @@ func TestDoctorDockerized(t *testing.T) {
 	got := doctorOut(t, "../../testdata/dockerized")
 	if !strings.Contains(got, "[ok] container") {
 		t.Errorf("missing [ok] container in:\n%s", got)
+	}
+}
+
+func TestDoctorSubcommand(t *testing.T) {
+	got := doctorOutArgs(t, "doctor", "--dir", "../../testdata/go-app")
+	if !strings.Contains(got, "stack     go (go ") || !strings.Contains(got, "next      vauban plan") {
+		t.Errorf("unexpected doctor report:\n%s", got)
 	}
 }

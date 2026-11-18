@@ -13,6 +13,15 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/ui"
 )
 
+func newDoctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Report the detected stack, what is missing and which tools are installed",
+		Args:  cobra.NoArgs,
+		RunE:  runDoctor,
+	}
+}
+
 func runDoctor(cmd *cobra.Command, _ []string) error {
 	dir, _ := cmd.Flags().GetString("dir")
 	p, err := detect.Scan(dir)

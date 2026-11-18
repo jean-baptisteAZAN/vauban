@@ -81,7 +81,7 @@ func TestExecRunnerForwardsOneSIGINT(t *testing.T) {
 	if err := helper.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer helper.Process.Kill()
+	defer func() { _ = helper.Process.Kill() }() // may already be gone
 	child, err := waitReady(ready)
 	if err != nil {
 		t.Fatal(err)

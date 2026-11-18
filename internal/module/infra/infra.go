@@ -142,7 +142,7 @@ func headLines(root string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only file, nothing to flush
 	var lines []string
 	sc := bufio.NewScanner(f)
 	for len(lines) < 2 && sc.Scan() {

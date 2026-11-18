@@ -31,7 +31,7 @@ func NewRoot(version string) *cobra.Command {
 	pf.String("dir", ".", "project directory")
 	pf.Bool("yes", false, "accept defaults without prompting")
 	pf.Bool("force", false, "overwrite existing files")
-	root.AddCommand(newVersionCmd(version), newPlanCmd(), newApplyCmd(), newDestroyCmd())
+	root.AddCommand(newDoctorCmd(), newVersionCmd(version), newPlanCmd(), newApplyCmd(), newDestroyCmd())
 	return root
 }
 

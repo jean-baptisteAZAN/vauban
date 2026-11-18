@@ -2,6 +2,7 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -40,6 +41,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build ./...
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy && git diff --exit-code go.mod go.sum
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"

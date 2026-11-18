@@ -191,13 +191,13 @@ func fakeAPI(t *testing.T) *hetzner {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/locations", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"locations":[
+		_, _ = w.Write([]byte(`{"locations":[
 			{"id":2,"name":"nbg1","description":"Nuremberg DC Park 1","country":"DE","city":"Nuremberg"},
 			{"id":1,"name":"fsn1","description":"Falkenstein DC Park 1","country":"DE","city":"Falkenstein"}
 		]}`))
 	})
 	mux.HandleFunc("/server_types", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"server_types":[
+		_, _ = w.Write([]byte(`{"server_types":[
 			{"id":115,"name":"cx33","cores":4,"memory":8,"disk":80,"cpu_type":"shared","architecture":"x86",
 			 "prices":[{"location":"nbg1","price_monthly":{"net":"5.4900000000","gross":"6.5331000000"}}],
 			 "locations":[{"id":2,"name":"nbg1","available":true}]},
@@ -226,7 +226,7 @@ func fakeAPI(t *testing.T) *hetzner {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Header.Get("Authorization") != "Bearer goodtoken" {
 			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":{"code":"unauthorized","message":"unable to authenticate"}}`))
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"unable to authenticate"}}`))
 			return
 		}
 		mux.ServeHTTP(w, r)

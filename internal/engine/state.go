@@ -64,9 +64,9 @@ func (s *State) Save(root string) error {
 	if err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer os.Remove(tmp.Name()) //nolint:errcheck // best-effort cleanup of the temp file (gone after rename)
 	if _, err := tmp.Write(append(b, '\n')); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the write error is the one to report
 		return fmt.Errorf("write state: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
