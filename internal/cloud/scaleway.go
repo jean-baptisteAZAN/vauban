@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"regexp"
 	"slices"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
+	"gopkg.in/yaml.v3"
 )
 
 // Defaults verified 2026-11-18 against the public Scaleway API
@@ -50,7 +53,7 @@ type scalewayCreds struct{ access, secret, project, zone string }
 // scalewayCredentials reads SCW_ACCESS_KEY, SCW_SECRET_KEY and
 // SCW_DEFAULT_PROJECT_ID (and SCW_DEFAULT_ZONE), filling whatever is missing
 // from the active profile of the scw config file (SCW_CONFIG_PATH, SCW_PROFILE
-// are honoured). Errors never contain secret values.
+// are honoured, parsed without the SDK loader). Errors never contain secret values.
 func scalewayCredentials() (scalewayCreds, error) {
 	c := scalewayCreds{
 		access:  os.Getenv("SCW_ACCESS_KEY"),
@@ -59,25 +62,14 @@ func scalewayCredentials() (scalewayCreds, error) {
 		zone:    os.Getenv("SCW_DEFAULT_ZONE"),
 	}
 	if c.access == "" || c.secret == "" || c.project == "" {
-		path := scw.GetConfigPath()
-		cfg, err := scw.LoadConfig()
-		var notFound *scw.ConfigFileNotFoundError
-		switch {
-		case errors.As(err, &notFound):
-			// no config file: only the env counts
-		case err != nil:
-			// the SDK error can quote file content, so do not wrap err.
-			return c, fmt.Errorf("scaleway: cannot read %s: invalid or unreadable config", path)
-		default:
-			prof, err := cfg.GetActiveProfile()
-			if err != nil {
-				return c, fmt.Errorf("scaleway: active profile of %s not found", path)
-			}
-			c.access = cmp.Or(c.access, deref(prof.AccessKey))
-			c.secret = cmp.Or(c.secret, deref(prof.SecretKey))
-			c.project = cmp.Or(c.project, deref(prof.DefaultProjectID))
-			c.zone = cmp.Or(c.zone, deref(prof.DefaultZone))
+		prof, err := loadScalewayProfile()
+		if err != nil {
+			return c, err
 		}
+		c.access = cmp.Or(c.access, prof.AccessKey)
+		c.secret = cmp.Or(c.secret, prof.SecretKey)
+		c.project = cmp.Or(c.project, prof.DefaultProjectID)
+		c.zone = cmp.Or(c.zone, prof.DefaultZone)
 	}
 	var missing []string
 	for _, m := range []struct{ name, val string }{
@@ -96,11 +88,61 @@ func scalewayCredentials() (scalewayCreds, error) {
 	return c, nil
 }
 
-func deref(s *string) string {
-	if s == nil {
-		return ""
+// scalewayStderr receives the config permission warning; tests replace it.
+var scalewayStderr io.Writer = os.Stderr
+
+type scalewayProfile struct {
+	AccessKey        string `yaml:"access_key"`
+	SecretKey        string `yaml:"secret_key"`
+	DefaultProjectID string `yaml:"default_project_id"`
+	DefaultZone      string `yaml:"default_zone"`
+}
+
+// loadScalewayProfile reads the active profile of the scw config file. It
+// parses the file itself instead of scw.LoadConfig, which prints a warning on
+// stdout when the file is group/world readable. A missing file is not an error.
+// Errors never contain file content.
+func loadScalewayProfile() (scalewayProfile, error) {
+	var none scalewayProfile
+	path := scw.GetConfigPath() // computes the path only; honours SCW_CONFIG_PATH
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) && os.Getenv("SCW_CONFIG_PATH") == "" && strings.HasSuffix(path, ".yaml") {
+		// same fallback as the scw CLI: config.yml next to config.yaml
+		path = strings.TrimSuffix(path, ".yaml") + ".yml"
+		data, err = os.ReadFile(path)
 	}
-	return *s
+	if errors.Is(err, fs.ErrNotExist) {
+		return none, nil
+	}
+	if err != nil {
+		return none, fmt.Errorf("scaleway: cannot read %s", path)
+	}
+	if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(scalewayStderr, "warning: %s is readable by others; run chmod 600 %s\n", path, path)
+	}
+	var cfg struct {
+		scalewayProfile `yaml:",inline"`
+		ActiveProfile   string                     `yaml:"active_profile"`
+		Profiles        map[string]scalewayProfile `yaml:"profiles"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		// yaml errors can quote file content, so do not wrap err.
+		return none, fmt.Errorf("scaleway: parse %s: invalid YAML", path)
+	}
+	prof := cfg.scalewayProfile
+	name := cmp.Or(os.Getenv("SCW_PROFILE"), cfg.ActiveProfile)
+	if name != "" && name != "default" {
+		p, ok := cfg.Profiles[name]
+		if !ok {
+			return none, fmt.Errorf("scaleway: profile %q not found in %s", name, path)
+		}
+		// the selected profile overrides the default one field by field
+		prof.AccessKey = cmp.Or(p.AccessKey, prof.AccessKey)
+		prof.SecretKey = cmp.Or(p.SecretKey, prof.SecretKey)
+		prof.DefaultProjectID = cmp.Or(p.DefaultProjectID, prof.DefaultProjectID)
+		prof.DefaultZone = cmp.Or(p.DefaultZone, prof.DefaultZone)
+	}
+	return prof, nil
 }
 
 func (*scaleway) CredentialsEnv() ([]string, error) {

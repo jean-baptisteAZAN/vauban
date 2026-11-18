@@ -132,4 +132,9 @@ output "server_ip" {
 # The ipv6 resource only exposes the prefix; read the full address from the server.
 output "server_ipv6" {
   value = one([for ip in scaleway_instance_server.vauban.public_ips : ip.address if ip.family == "inet6"])
+
+  precondition {
+    condition     = length([for ip in scaleway_instance_server.vauban.public_ips : ip if ip.family == "inet6"]) == 1
+    error_message = "the server has no public IPv6 address; expected exactly one."
+  }
 }

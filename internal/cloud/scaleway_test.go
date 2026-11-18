@@ -1,7 +1,9 @@
 package cloud
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -317,5 +319,72 @@ func TestScalewaySizes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Sizes = %#v", got)
+	}
+}
+
+func TestScalewayCredentialsEnvPartialNoConfigFile(t *testing.T) {
+	scwHome(t) // SCW_CONFIG_PATH points at a missing file
+	t.Setenv("SCW_ACCESS_KEY", testSCWAccess)
+	_, err := (&scaleway{}).CredentialsEnv()
+	if err == nil || !strings.Contains(err.Error(), "SCW_SECRET_KEY") || !strings.Contains(err.Error(), "SCW_DEFAULT_PROJECT_ID") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(err.Error(), testSCWAccess) {
+		t.Errorf("key leaked: %v", err)
+	}
+}
+
+func TestScalewayConfigYmlFallback(t *testing.T) {
+	scwHome(t)
+	dir := t.TempDir()
+	t.Setenv("SCW_CONFIG_PATH", "")
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "scw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "access_key: " + testSCWAccess + "\nsecret_key: " + testSCWSecret + "\ndefault_project_id: " + testSCWProject + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "scw", "config.yml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&scaleway{}).CredentialsEnv()
+	if err != nil || len(got) != 3 || got[0] != "SCW_ACCESS_KEY="+testSCWAccess {
+		t.Fatalf("got %v, %v", got, err)
+	}
+}
+
+func TestScalewayConfigPermissiveWarnsOnStderrOnly(t *testing.T) {
+	writeScwConfig(t, "access_key: "+testSCWAccess+"\nsecret_key: "+testSCWSecret+"\ndefault_project_id: "+testSCWProject+"\n")
+	path := os.Getenv("SCW_CONFIG_PATH")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	old := scalewayStderr
+	scalewayStderr = &stderr
+	defer func() { scalewayStderr = old }()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut := os.Stdout
+	os.Stdout = w
+	got, cerr := (&scaleway{}).CredentialsEnv()
+	os.Stdout = oldOut
+	w.Close()
+	out, _ := io.ReadAll(r)
+
+	if cerr != nil || len(got) != 3 {
+		t.Fatalf("got %v, %v", got, cerr)
+	}
+	if len(out) != 0 {
+		t.Errorf("stdout not empty: %q", out)
+	}
+	want := "warning: " + path + " is readable by others; run chmod 600 " + path + "\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if strings.Contains(stderr.String(), testSCWSecret) {
+		t.Error("secret in warning")
 	}
 }
