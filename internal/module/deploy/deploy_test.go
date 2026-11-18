@@ -163,7 +163,7 @@ func TestGoldenFiles(t *testing.T) {
 		t.Fatalf("compose yaml: %v", err)
 	}
 	caddySvc, app := c.Services["caddy"], c.Services["app"]
-	if caddySvc.Image != "caddy:2" || app.Image != "ghcr.io/acme/widget:latest" {
+	if caddySvc.Image != "caddy:2" || app.Image != "ghcr.io/acme/widget:${IMAGE_TAG:?IMAGE_TAG must be set}" {
 		t.Errorf("images = %q, %q", caddySvc.Image, app.Image)
 	}
 	if !reflect.DeepEqual(caddySvc.Ports, []string{"80:80", "443:443", "443:443/udp"}) {
@@ -199,6 +199,8 @@ type workflow struct {
 	Jobs        map[string]struct {
 		If    string `yaml:"if"`
 		Steps []struct {
+			ID   string            `yaml:"id"`
+			If   string            `yaml:"if"`
 			Uses string            `yaml:"uses"`
 			With map[string]string `yaml:"with"`
 			Env  map[string]string `yaml:"env"`
@@ -214,6 +216,50 @@ func parseWorkflow(t *testing.T, s string) workflow {
 		t.Fatalf("invalid yaml: %v\n%s", err, s)
 	}
 	return w
+}
+
+const pushGuard = "github.event.workflow_run.conclusion == 'success' && " +
+	"github.event.workflow_run.event == 'push' && " +
+	"github.event.workflow_run.head_repository.full_name == github.repository"
+
+// TestForkPRCannotDeploy: a pull request (even from a fork's own main) runs
+// CI with its own workflow file and so controls the CI conclusion; deploy
+// must only follow push runs of this repository.
+func TestForkPRCannotDeploy(t *testing.T) {
+	w := parseWorkflow(t, file(t, plan(t, goApp(t), cfg()), ".github/workflows/deploy.yml"))
+	guard := w.Jobs["deploy"].If
+	for _, want := range []string{
+		"github.event.workflow_run.event == 'push'",
+		"github.event.workflow_run.head_repository.full_name == github.repository",
+		"github.event.workflow_run.conclusion == 'success'",
+	} {
+		if !strings.Contains(guard, want) {
+			t.Errorf("guard %q lacks %q", guard, want)
+		}
+	}
+	if strings.Contains(guard, "||") {
+		t.Errorf("guard has an alternative: %q", guard)
+	}
+}
+
+// TestDeploySkipsUnlessTip: steps that touch the server only run when the
+// commit is still the tip of main.
+func TestDeploySkipsUnlessTip(t *testing.T) {
+	for _, p := range []*detect.Project{goApp(t), unknownStack(t)} {
+		w := parseWorkflow(t, file(t, plan(t, p, cfg()), ".github/workflows/deploy.yml"))
+		var gated int
+		for _, s := range w.Jobs["deploy"].Steps {
+			if strings.Contains(s.Run, "scp ") || s.Env["SECRETS_JSON"] != "" {
+				if s.If != "steps.tip.outputs.current == 'true'" {
+					t.Errorf("step not gated on tip: if=%q", s.If)
+				}
+				gated++
+			}
+		}
+		if gated != 2 {
+			t.Errorf("gated steps = %d", gated)
+		}
+	}
 }
 
 func TestDeployWorkflow(t *testing.T) {
@@ -250,7 +296,7 @@ func TestDeployWorkflow(t *testing.T) {
 			sha := "${{ github.sha }}"
 			if tc.workflowRun {
 				sha = "${{ github.event.workflow_run.head_sha }}"
-				if job.If != "github.event.workflow_run.conclusion == 'success'" {
+				if job.If != pushGuard {
 					t.Errorf("if = %q", job.If)
 				}
 				trig := w.On["workflow_run"].(map[string]any)
@@ -298,7 +344,10 @@ func TestDeployWorkflow(t *testing.T) {
 				"deploy@$DEPLOY_HOST:~/app/",
 				"--password-stdin",
 				"docker compose pull && docker compose up -d --remove-orphans",
-				"docker logout ghcr.io",
+				"IMAGE_TAG: " + sha,
+				"IMAGE_TAG=%q",
+				"DOCKER_CONFIG=$(mktemp -d)",
+				`gh api "repos/$REPO/commits/main" --jq .sha`,
 				"chmod 600 .env",
 			} {
 				if !strings.Contains(got, want) {
@@ -460,7 +509,7 @@ func TestDomainStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out["domain"] != "1-2-3-4.sslip.io" || out["deployed_ip"] != "1.2.3.4" {
+	if out["domain"] != "1-2-3-4.sslip.io" || out["deployed_ip"] != "1.2.3.4" || out["deployed_domain"] != "1-2-3-4.sslip.io" {
 		t.Errorf("out = %v", out)
 	}
 	if _, err := s.Apply(ctx, &engine.Env{In: engine.Outputs{}}); err == nil {
@@ -477,24 +526,42 @@ func TestDomainStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out["domain"] != "app.example.com" || out["deployed_ip"] != "1.2.3.4" {
+	if out["domain"] != "app.example.com" || out["deployed_ip"] != "1.2.3.4" || out["deployed_domain"] != "app.example.com" {
 		t.Errorf("out = %v", out)
 	}
 }
 
 func TestStaleSteps(t *testing.T) {
 	want := []string{"deploy:domain", "secret:DEPLOY_HOST", "secret:DEPLOY_DOMAIN"}
+	deployed := engine.Outputs{"server_ip": "1.2.3.4", "deployed_ip": "1.2.3.4", "deployed_domain": "1-2-3-4.sslip.io"}
+	with := func(kv ...string) engine.Outputs {
+		o := engine.Outputs{}
+		for k, v := range deployed {
+			o[k] = v
+		}
+		for i := 0; i < len(kv); i += 2 {
+			o[kv[i]] = kv[i+1]
+		}
+		return o
+	}
 	for _, tc := range []struct {
-		name string
-		out  engine.Outputs
-		want []string
+		name, domain string
+		out          engine.Outputs
+		want         []string
 	}{
-		{"fresh", engine.Outputs{}, nil},
-		{"infra only", engine.Outputs{"server_ip": "1.2.3.4"}, nil},
-		{"same ip", engine.Outputs{"server_ip": "1.2.3.4", "deployed_ip": "1.2.3.4"}, nil},
-		{"replaced", engine.Outputs{"server_ip": "5.6.7.8", "deployed_ip": "1.2.3.4"}, want},
+		{"fresh", "", engine.Outputs{}, nil},
+		{"infra only", "", engine.Outputs{"server_ip": "1.2.3.4"}, nil},
+		{"no change", "", deployed, nil},
+		{"no change, custom domain", "app.example.com", with("deployed_domain", "app.example.com"), nil},
+		{"ip changed", "", with("server_ip", "5.6.7.8"), want},
+		{"ip changed, custom domain", "app.example.com", with("server_ip", "5.6.7.8", "deployed_domain", "app.example.com"), want},
+		{"domain set", "app.example.com", deployed, want},
+		{"domain changed", "new.example.com", with("deployed_domain", "app.example.com"), want},
+		{"domain removed", "", with("deployed_domain", "app.example.com"), want},
 	} {
-		if got := StaleSteps(&engine.State{Outputs: tc.out}); !reflect.DeepEqual(got, tc.want) {
+		c := cfg()
+		c.Domain = tc.domain
+		if got := StaleSteps(&engine.State{Outputs: tc.out}, c); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}

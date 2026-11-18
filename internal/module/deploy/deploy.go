@@ -156,19 +156,34 @@ func SSLipDomain(ip string) string {
 }
 
 // StaleSteps returns the step IDs the caller must clear from st.Done before
-// Execute when the server was replaced (its IP differs from the one the
-// secrets were set for), or nil.
-func StaleSteps(st *engine.State) []string {
-	deployed, current := st.Outputs["deployed_ip"], st.Outputs["server_ip"]
-	if deployed == "" || current == "" || deployed == current {
+// Execute when the deploy secrets no longer match: the server was replaced
+// (its IP differs from deployed_ip) or the desired domain differs from
+// deployed_domain. It returns nil otherwise, or before any deploy.
+func StaleSteps(st *engine.State, c *config.Config) []string {
+	ip := st.Outputs["server_ip"]
+	deployedIP, deployedDomain := st.Outputs["deployed_ip"], st.Outputs["deployed_domain"]
+	ipChanged := deployedIP != "" && ip != "" && ip != deployedIP
+	domainChanged := false
+	if deployedDomain != "" && ip != "" {
+		domainChanged = desiredDomain(c.Domain, ip) != deployedDomain
+	}
+	if !ipChanged && !domainChanged {
 		return nil
 	}
 	return []string{domainStepID, "secret:DEPLOY_HOST", "secret:DEPLOY_DOMAIN"}
 }
 
+// desiredDomain is the configured domain, else the sslip.io name of ip.
+func desiredDomain(configured, ip string) string {
+	if configured != "" {
+		return configured
+	}
+	return SSLipDomain(ip)
+}
+
 // domainStep resolves the public domain at Apply time, once the server IP is
-// known: vauban.yaml's domain, else <ip>.sslip.io. It outputs domain and
-// deployed_ip (the server IP the deploy secrets were set for).
+// known: vauban.yaml's domain, else <ip>.sslip.io. It outputs domain, and
+// deployed_ip and deployed_domain (what the deploy secrets were set for).
 type domainStep struct{ domain string }
 
 func (domainStep) ID() string { return domainStepID }
@@ -184,9 +199,6 @@ func (d domainStep) Apply(_ context.Context, env *engine.Env) (engine.Outputs, e
 	if ip == "" {
 		return nil, errors.New("deploy domain: no server_ip output (run infra first)")
 	}
-	domain := d.domain
-	if domain == "" {
-		domain = SSLipDomain(ip)
-	}
-	return engine.Outputs{"domain": domain, "deployed_ip": ip}, nil
+	domain := desiredDomain(d.domain, ip)
+	return engine.Outputs{"domain": domain, "deployed_ip": ip, "deployed_domain": domain}, nil
 }
