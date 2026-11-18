@@ -4,12 +4,21 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Draft PRs don't run CI: open PRs as drafts while iterating and mark them
+    # "Ready for review" when done. Pushes to a ready PR still run (required checks).
+    types: [opened, reopened, synchronize, ready_for_review]
+
+# A new push to the same PR cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: github.event_name == 'push' || !github.event.pull_request.draft
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +32,7 @@ jobs:
       - run: go test -race ./...
 
   lint:
+    if: github.event_name == 'push' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -34,6 +44,7 @@ jobs:
           version: latest
 
   build:
+    if: github.event_name == 'push' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
