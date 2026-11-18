@@ -38,3 +38,10 @@ func TestDoctorGoApp(t *testing.T) {
 		t.Errorf("unexpected stack line:\n%s", got)
 	}
 }
+
+func TestDoctorDockerized(t *testing.T) {
+	got := doctorOut(t, "../../testdata/dockerized")
+	if !strings.Contains(got, "[ok] container") {
+		t.Errorf("missing [ok] container in:\n%s", got)
+	}
+}

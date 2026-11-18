@@ -1,0 +1,13 @@
+.git
+.vauban
+.env
+.env.*
+node_modules
+.venv
+__pycache__
+*.pyc
+infra/.terraform
+*.tfstate
+*.tfstate.*
+Dockerfile
+.dockerignore
