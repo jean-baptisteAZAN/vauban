@@ -81,10 +81,8 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	if err != nil {
 		return nil, err
 	}
-	if applied := st.Outputs["infra_fingerprint"]; applied != "" {
-		if old, _, _ := strings.Cut(applied, "/"); old != c.Cloud {
-			return nil, fmt.Errorf("changing cloud (%s → %s) is not supported in place: run vauban destroy first, then vauban apply", old, c.Cloud)
-		}
+	if err := checkCloud(p.Root, st, c); err != nil {
+		return nil, err
 	}
 	prov, err := cloud.Get(c.Cloud)
 	if err != nil {
@@ -103,7 +101,7 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	tofu, _ := tools.Tofu()
 	return []engine.Step{
 		deployKey{project: name, path: keyPath},
-		mainTF{prov: prov, in: in, fp: fingerprint(c), keyPath: keyPath, rerender: StaleSteps(st, c) != nil},
+		mainTF{prov: prov, in: in, fp: fingerprint(c), keyPath: keyPath, rerender: StaleSteps(p.Root, st, c) != nil},
 		cloudInit{keyPath: keyPath},
 		engine.WriteFile{Path: dir + "/.gitignore", Content: []byte(gitignore), Mode: 0o644},
 		engine.RunCommand{StepID: "infra:init", Cmd: tofuCmd(tofu, "init", "-input=false")},
@@ -113,18 +111,47 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	}, nil
 }
 
+// checkCloud refuses a cloud change while servers are applied: the applied
+// fingerprint, or the main.tf on disk, names another cloud. With no applied
+// fingerprint (never applied, or after vauban destroy) any cloud is allowed.
+func checkCloud(root string, st *engine.State, c *config.Config) error {
+	applied := st.Outputs["infra_fingerprint"]
+	if applied == "" {
+		return nil
+	}
+	disk, _ := readFingerprint(root)
+	for _, fp := range []string{applied, disk} {
+		if old, _, _ := strings.Cut(fp, "/"); fp != "" && old != c.Cloud {
+			return fmt.Errorf("changing cloud (%s → %s) is not supported in place: run vauban destroy first, then vauban apply", old, c.Cloud)
+		}
+	}
+	return nil
+}
+
 // StaleSteps returns the step IDs the caller must clear from st.Done before
 // Execute, or nil. They are stale when the applied fingerprint differs from
-// vauban.yaml (drift), or when the rendered main.tf was never applied (an
-// interrupted run), so a resume always re-renders and re-plans before apply.
-func StaleSteps(st *engine.State, c *config.Config) []string {
+// vauban.yaml (drift), when the rendered main.tf was never applied (an
+// interrupted run), or when the managed main.tf on disk was rendered for
+// another fingerprint (e.g. kept after vauban destroy), so apply always
+// re-renders and re-plans before applying.
+func StaleSteps(root string, st *engine.State, c *config.Config) []string {
+	want := fingerprint(c)
 	applied, rendered := st.Outputs["infra_fingerprint"], st.Outputs["rendered_fingerprint"]
-	drift := applied != "" && applied != fingerprint(c)
+	drift := applied != "" && applied != want
 	unapplied := rendered != "" && rendered != applied
-	if !drift && !unapplied {
+	disk, err := readFingerprint(root)
+	diskStale := err == nil && disk != want
+	if !drift && !unapplied && !diskStale {
 		return nil
 	}
 	return []string{"infra:main-tf", "infra:plan", "infra:apply", "infra:output"}
+}
+
+// RenderedFingerprint returns the fingerprint recorded in the managed
+// infra/main.tf under root, or "" when there is none.
+func RenderedFingerprint(root string) string {
+	fp, _ := readFingerprint(root)
+	return fp
 }
 
 // fingerprint is cloud/region/size with provider defaults filled in.
@@ -356,7 +383,8 @@ func readPub(path string) (string, error) {
 
 // mainTF renders infra/main.tf at Apply time, once the deploy key exists:
 // marker, fingerprint line, provider Terraform. It keeps an existing file
-// unless Force or rerender (drift). Outputs rendered_fingerprint, the
+// unless Force, rerender (drift), or the file is vauban-managed and was
+// rendered for another fingerprint. Outputs rendered_fingerprint, the
 // fingerprint of the main.tf on disk.
 type mainTF struct {
 	prov     cloud.Provider
@@ -371,7 +399,9 @@ func (mainTF) Kind() string       { return engine.KindWrite }
 func (m mainTF) Describe() string { return "write " + mainPath }
 
 func (m mainTF) Apply(_ context.Context, env *engine.Env) (engine.Outputs, error) {
-	skip, err := skipExisting(env, mainPath, m.rerender)
+	disk, err := readFingerprint(env.Root)
+	stale := err == nil && disk != m.fp // managed, rendered for another config
+	skip, err := skipExisting(env, mainPath, m.rerender || stale)
 	if err != nil {
 		return nil, err
 	}

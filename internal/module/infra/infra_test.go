@@ -416,7 +416,7 @@ func applyWith(t *testing.T, root string, c *config.Config, run engine.Runner, c
 	if err != nil {
 		return st, err
 	}
-	for _, id := range StaleSteps(st, c) {
+	for _, id := range StaleSteps(root, st, c) {
 		delete(st.Done, id)
 	}
 	return st, engine.Execute(context.Background(), steps, st, &engine.Env{Root: root, Run: run, Confirm: confirm, Force: force})
@@ -582,7 +582,7 @@ func TestExecuteFresh(t *testing.T) {
 	if bytes.Contains(stateFile, []byte(token)) || bytes.Contains(stateFile, []byte("PRIVATE KEY")) {
 		t.Error("state leaks a secret")
 	}
-	if got := StaleSteps(st, cfg()); got != nil {
+	if got := StaleSteps(root, st, cfg()); got != nil {
 		t.Errorf("stale after clean run: %v", got)
 	}
 
@@ -611,7 +611,7 @@ func TestResumeDriftPlanFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := StaleSteps(st, c), []string{"infra:main-tf", "infra:plan", "infra:apply", "infra:output"}; !reflect.DeepEqual(got, want) {
+	if got, want := StaleSteps(root, st, c), []string{"infra:main-tf", "infra:plan", "infra:apply", "infra:output"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("StaleSteps = %v, want %v", got, want)
 	}
 
@@ -640,7 +640,7 @@ func TestResumeDriftPlanFails(t *testing.T) {
 	if st.Outputs["infra_fingerprint"] != "hetzner/nbg1/cx33" {
 		t.Errorf("fingerprint = %q", st.Outputs["infra_fingerprint"])
 	}
-	if StaleSteps(st, c) != nil {
+	if StaleSteps(root, st, c) != nil {
 		t.Error("still stale after apply")
 	}
 }
@@ -674,11 +674,10 @@ func TestManagedEmptyState(t *testing.T) {
 	_, home, root := setup(t)
 	writeKey(t, home, "vauban_shop_ed25519", "PRIVATE")
 	writeKey(t, home, "vauban_shop_ed25519.pub", deployPub)
-	writeMainTF(t, root, "# managed by vauban\n# fingerprint: hetzner/nbg1/cx23\nterraform {}\n")
-	c := cfg()
-	c.Size = "cx33" // config differs from what main.tf was rendered for
+	const body = "# managed by vauban\n# fingerprint: hetzner/nbg1/cx23\nterraform {}\n"
+	writeMainTF(t, root, body)
 	run := newRunner(safePlanJSON)
-	st, err := apply(t, root, c, run, nil)
+	st, err := apply(t, root, cfg(), run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +688,7 @@ func TestManagedEmptyState(t *testing.T) {
 		t.Errorf("infra_fingerprint = %q, want the one in main.tf", st.Outputs["infra_fingerprint"])
 	}
 	mainTF, _ := os.ReadFile(filepath.Join(root, "infra", "main.tf"))
-	if string(mainTF) != "# managed by vauban\n# fingerprint: hetzner/nbg1/cx23\nterraform {}\n" {
+	if string(mainTF) != body {
 		t.Errorf("main.tf rewritten: %s", mainTF)
 	}
 	for _, f := range []string{"cloud-init.yaml", ".gitignore"} {
@@ -697,9 +696,36 @@ func TestManagedEmptyState(t *testing.T) {
 			t.Errorf("%s not written: %v", f, err)
 		}
 	}
-	// the mismatch with vauban.yaml is now visible as drift
-	if StaleSteps(st, c) == nil {
-		t.Error("want drift between applied cx23 and config cx33")
+}
+
+// Managed main.tf rendered for another config with no applied fingerprint
+// (e.g. kept after vauban destroy): re-rendered for vauban.yaml, even across clouds.
+func TestManagedEmptyStateRerendersMismatch(t *testing.T) {
+	_, home, root := setup(t)
+	writeKey(t, home, "vauban_shop_ed25519", "PRIVATE")
+	writeKey(t, home, "vauban_shop_ed25519.pub", deployPub)
+	writeMainTF(t, root, "# managed by vauban\n# fingerprint: digitalocean/fra1/s-1vcpu-1gb\nterraform {}\n")
+	c := cfg()
+	c.Size = "cx33"
+	st, err := engine.LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if StaleSteps(root, st, c) == nil {
+		t.Error("want stale steps: main.tf on disk differs from vauban.yaml")
+	}
+	if st, err = apply(t, root, c, newRunner(safePlanJSON), nil); err != nil {
+		t.Fatal(err)
+	}
+	mainTF, _ := os.ReadFile(filepath.Join(root, "infra", "main.tf"))
+	if !strings.HasPrefix(string(mainTF), "# managed by vauban\n# fingerprint: hetzner/nbg1/cx33\n") {
+		t.Errorf("main.tf not re-rendered: %s", mainTF)
+	}
+	if st.Outputs["infra_fingerprint"] != "hetzner/nbg1/cx33" {
+		t.Errorf("infra_fingerprint = %q", st.Outputs["infra_fingerprint"])
+	}
+	if StaleSteps(root, st, c) != nil {
+		t.Error("still stale after apply")
 	}
 }
 
@@ -877,6 +903,21 @@ func TestCloudChangeRefused(t *testing.T) {
 	if err := st.Save(root); err != nil {
 		t.Fatal(err)
 	}
+	_, err := New().Plan(project(t, root), cfg())
+	want := "changing cloud (digitalocean → hetzner) is not supported in place: run vauban destroy first, then vauban apply"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+// The on-disk main.tf also counts while servers are applied.
+func TestCloudChangeRefusedFromDisk(t *testing.T) {
+	_, _, root := setup(t)
+	st := &engine.State{Done: map[string]bool{"infra:apply": true}, Outputs: engine.Outputs{"infra_fingerprint": "hetzner/nbg1/cx23"}}
+	if err := st.Save(root); err != nil {
+		t.Fatal(err)
+	}
+	writeMainTF(t, root, "# managed by vauban\n# fingerprint: digitalocean/fra1/s-1vcpu-1gb\nterraform {}\n")
 	_, err := New().Plan(project(t, root), cfg())
 	want := "changing cloud (digitalocean → hetzner) is not supported in place: run vauban destroy first, then vauban apply"
 	if err == nil || err.Error() != want {

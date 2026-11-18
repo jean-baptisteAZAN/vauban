@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,8 +16,10 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/jean-baptisteAZAN/vauban/internal/cloud"
 	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
+	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
 )
 
 const (
@@ -287,5 +290,126 @@ func TestApplyStyledAndPlainShowExistingFileAsSkipped(t *testing.T) {
 	}
 	if strings.Contains(out, "skip (exists) Dockerfile") {
 		t.Errorf("raw log line leaked:\n%s", out)
+	}
+}
+
+const doToken = "do-plan-secret"
+
+// destroyed is destroyEnv after a confirmed destroy, with fr's calls reset.
+func destroyed(t *testing.T) (string, *engine.FakeRunner) {
+	t.Helper()
+	root, fr := destroyEnv(t)
+	if out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop"); err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	fr.Calls = nil
+	return root, fr
+}
+
+func readMainTF(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "infra", "main.tf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// After destroy the managed main.tf stays; a new region must re-render it.
+func TestApplyAfterDestroyRerendersNewRegion(t *testing.T) {
+	root, fr := destroyed(t)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--region", "fsn1")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if tf := readMainTF(t, root); !strings.HasPrefix(tf, infra.Marker+"\n# fingerprint: hetzner/fsn1/cx23\n# tf fsn1\n") {
+		t.Errorf("main.tf not re-rendered for fsn1:\n%s", tf)
+	}
+	st, err := engine.LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Outputs["infra_fingerprint"]; got != "hetzner/fsn1/cx23" {
+		t.Errorf("infra_fingerprint = %q, want hetzner/fsn1/cx23", got)
+	}
+	if !slices.Contains(callLines(fr), tofuApplyCmd) {
+		t.Errorf("tofu apply not run: %q", callLines(fr))
+	}
+}
+
+// After destroy, changing cloud is allowed: DigitalOcean tf and credentials.
+func TestApplyAfterDestroyChangesCloud(t *testing.T) {
+	t.Cleanup(cloud.Register(&doProvider{}))
+	root, fr := destroyed(t)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "digitalocean")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if tf := readMainTF(t, root); !strings.HasPrefix(tf, infra.Marker+"\n# fingerprint: digitalocean/fra1/s-1vcpu-1gb\n# do tf fra1\n") {
+		t.Errorf("main.tf not re-rendered for digitalocean:\n%s", tf)
+	}
+	for _, c := range fr.Calls {
+		line := strings.Join(append([]string{c.Name}, c.Args...), " ")
+		if line != tofuPlanCmd && line != tofuApplyCmd {
+			continue
+		}
+		if !slices.Contains(c.Env, "DIGITALOCEAN_TOKEN="+doToken) || slices.Contains(c.Env, "HCLOUD_TOKEN="+planToken) {
+			t.Errorf("%s env = %q, want DigitalOcean credentials only", line, c.Env)
+		}
+	}
+	st, err := engine.LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Outputs["infra_fingerprint"]; got != "digitalocean/fra1/s-1vcpu-1gb" {
+		t.Errorf("infra_fingerprint = %q", got)
+	}
+	if strings.Contains(out, doToken) {
+		t.Errorf("token in output:\n%s", out)
+	}
+}
+
+// secretValues returns the stdin of each gh secret set call, by secret name.
+func secretValues(t *testing.T, fr *engine.FakeRunner) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, c := range fr.Calls {
+		if c.Name == "gh" && len(c.Args) > 2 && c.Args[0] == "secret" && c.Args[1] == "set" && c.Stdin != nil {
+			b, err := io.ReadAll(c.Stdin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got[c.Args[2]] = string(b)
+		}
+	}
+	return got
+}
+
+// A drift apply that replaces the server re-sets DEPLOY_HOST and
+// DEPLOY_DOMAIN with the new IP in the same run.
+func TestApplyDriftNewIPResetsSecrets(t *testing.T) {
+	root, _ := applyEnv(t)
+	if out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner"); err != nil {
+		t.Fatalf("first apply: %v\n%s", err, out)
+	}
+	const newIP, newDomain = "203.0.113.20", "203-0-113-20.sslip.io"
+	fr := &engine.FakeRunner{Responses: map[string][]byte{
+		tofuShowCmd:   []byte(createJSON),
+		tofuOutputCmd: []byte(`{"server_ip":{"value":"` + newIP + `"}}`),
+	}}
+	setRunner(t, fr)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--region", "fsn1")
+	if err != nil {
+		t.Fatalf("drift apply: %v\n%s", err, out)
+	}
+	got := secretValues(t, fr)
+	if got["DEPLOY_HOST"] != newIP || got["DEPLOY_DOMAIN"] != newDomain {
+		t.Errorf("secrets = %q, want DEPLOY_HOST=%s DEPLOY_DOMAIN=%s", got, newIP, newDomain)
+	}
+	if _, ok := got["DEPLOY_SSH_KEY"]; ok {
+		t.Error("DEPLOY_SSH_KEY re-set without reason")
+	}
+	if !strings.Contains(out, "ready · https://"+newDomain+"\n") {
+		t.Errorf("footer does not show the new domain:\n%s", out)
 	}
 }

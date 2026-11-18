@@ -126,6 +126,18 @@ func Drift(w io.Writer, change string) {
 	fmt.Fprintln(w, "  "+note)
 }
 
+// Section writes a titled block of indented lines.
+func Section(w io.Writer, title string, lines ...string) {
+	fmt.Fprintln(w)
+	if Styled() {
+		title = Title.Render(title)
+	}
+	fmt.Fprintln(w, title)
+	for _, l := range lines {
+		fmt.Fprintln(w, "  "+l)
+	}
+}
+
 // Warning writes a single warning line.
 func Warning(w io.Writer, msg string) {
 	if Styled() {

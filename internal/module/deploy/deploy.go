@@ -170,6 +170,14 @@ func StaleSteps(st *engine.State, c *config.Config) []string {
 	if !ipChanged && !domainChanged {
 		return nil
 	}
+	return ServerSteps()
+}
+
+// ServerSteps are the step IDs that depend on the server IP: the domain and
+// the DEPLOY_HOST and DEPLOY_DOMAIN secrets. The caller clears them with the
+// infra steps whenever infra runs again, since the server (and its IP) may
+// be replaced; setting them again with the same values is harmless.
+func ServerSteps() []string {
 	return []string{domainStepID, "secret:DEPLOY_HOST", "secret:DEPLOY_DOMAIN"}
 }
 

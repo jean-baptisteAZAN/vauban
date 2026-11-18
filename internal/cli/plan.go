@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/x/term"
@@ -80,7 +81,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	w := cmd.OutOrStdout()
 	writeConfigSummary(w, p, c)
 	ui.RenderPlan(w, pl.items(root, force))
-	writeDrift(w, pl.st, c, pl.infraStale)
+	writeDrift(w, root, pl.st, c, pl.infraStale)
 	if err := engine.Preflight(pl.p, c, pl.mods); err != nil {
 		ui.Warnings(w, "before apply:", strings.Split(err.Error(), "\n"))
 	}
@@ -258,8 +259,13 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 	if pl.st, err = engine.LoadState(root); err != nil {
 		return nil, err
 	}
-	pl.infraStale = infra.StaleSteps(pl.st, c)
-	for _, id := range append(pl.infraStale, deploy.StaleSteps(pl.st, c)...) {
+	pl.infraStale = infra.StaleSteps(root, pl.st, c)
+	stale := slices.Concat(pl.infraStale, deploy.StaleSteps(pl.st, c))
+	if len(pl.infraStale) > 0 {
+		// The server may be replaced: re-read its IP after infra:output.
+		stale = append(stale, deploy.ServerSteps()...)
+	}
+	for _, id := range stale {
 		delete(pl.st.Done, id)
 	}
 	if force {
@@ -341,15 +347,23 @@ func writeConfigSummary(w io.Writer, p *detect.Project, c *config.Config) {
 	ui.Row(w, "port", fmt.Sprint(c.AppPort))
 }
 
-// writeDrift reports that vauban.yaml no longer matches the applied infra.
+// writeDrift reports why infra steps run again: vauban.yaml no longer
+// matches the applied infra (drift), or the managed main.tf on disk was
+// rendered for another config with nothing applied (kept after destroy).
 // The exact tofu plan is only meaningful once main.tf is re-rendered, so
 // apply shows it.
-func writeDrift(w io.Writer, st *engine.State, c *config.Config, stale []string) {
+func writeDrift(w io.Writer, root string, st *engine.State, c *config.Config, stale []string) {
 	if len(stale) == 0 {
 		return
 	}
-	applied := orDefault(st.Outputs["infra_fingerprint"], "not applied")
-	ui.Drift(w, "infra config changed: "+applied+" → "+infraFingerprint(c))
+	want := infraFingerprint(c)
+	if applied := st.Outputs["infra_fingerprint"]; applied != "" {
+		ui.Drift(w, "infra config changed: "+applied+" → "+want)
+		return
+	}
+	if disk := infra.RenderedFingerprint(root); disk != "" && disk != want {
+		ui.Section(w, "infra", "infra/main.tf was rendered for "+disk+"; apply re-renders it for "+want)
+	}
 }
 
 // infraFingerprint is cloud/region/size with provider defaults filled in,

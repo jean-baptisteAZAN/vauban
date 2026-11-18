@@ -36,7 +36,9 @@ func (*planProvider) Regions(context.Context) ([]cloud.Option, error) {
 func (*planProvider) Sizes(context.Context, string) ([]cloud.Option, error) {
 	return []cloud.Option{{ID: "cx23", Label: "cx23"}}, nil
 }
-func (*planProvider) Terraform(cloud.TFInput) ([]byte, error) { return []byte("# tf\n"), nil }
+func (*planProvider) Terraform(in cloud.TFInput) ([]byte, error) {
+	return []byte("# tf " + in.Region + "\n"), nil
+}
 
 // planEnv copies a fixture into a temp dir with a GitHub origin, isolates
 // HOME and installs the fake provider and runners. It returns the project root.
@@ -391,6 +393,12 @@ type doProvider struct{ planProvider }
 func (*doProvider) ID() string            { return "digitalocean" }
 func (*doProvider) DefaultRegion() string { return "fra1" }
 func (*doProvider) DefaultSize() string   { return "s-1vcpu-1gb" }
+func (*doProvider) CredentialsEnv() ([]string, error) {
+	return []string{"DIGITALOCEAN_TOKEN=" + doToken}, nil
+}
+func (*doProvider) Terraform(in cloud.TFInput) ([]byte, error) {
+	return []byte("# do tf " + in.Region + "\n"), nil
+}
 
 func TestPlanCloudChangeResetsRegionAndSize(t *testing.T) {
 	root, _ := planEnv(t, "go-app")
@@ -506,5 +514,22 @@ func TestPlanItemClassifiesByType(t *testing.T) {
 	rc := engine.RunCommand{StepID: "x:z", Label: "lbl", Cmd: engine.Cmd{Name: "echo", Args: []string{"hi"}}}
 	if got := planItem(rc, root, st, false); got.Kind != ui.PlanCommand || got.Text != "echo hi" || got.Note != "lbl" {
 		t.Errorf("RunCommand = %+v", got)
+	}
+}
+
+// A managed main.tf kept after destroy is re-rendered, not reported as drift.
+func TestPlanAfterDestroyShowsRerender(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\nregion: fsn1\nsize: cx23\napp_port: 8080\n")
+	out, err := execPlan(t, root)
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "  infra/main.tf was rendered for hetzner/nbg1/cx23; apply re-renders it for hetzner/fsn1/cx23\n") {
+		t.Errorf("missing re-render note in:\n%s", out)
+	}
+	if strings.Contains(out, "\ndrift\n") || !strings.Contains(out, "+ write infra/main.tf") {
+		t.Errorf("want main.tf write and no drift section:\n%s", out)
 	}
 }
