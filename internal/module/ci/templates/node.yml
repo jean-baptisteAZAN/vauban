@@ -19,6 +19,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:{{template "nodesetup" .}}
-      - run: {{.PM}} test
+      - run: {{.PM}} run test
 {{- end}}
 {{template "build"}}

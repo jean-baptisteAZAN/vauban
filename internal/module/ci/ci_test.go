@@ -217,3 +217,45 @@ func TestDetectAndMeta(t *testing.T) {
 		t.Error("unknown stack should error")
 	}
 }
+
+func TestNodePackageManagers(t *testing.T) {
+	for _, tc := range []struct {
+		pm, lock, pkg string
+		cache         string // expected cache line, "" = none
+		extra         string
+		notWant       string
+	}{
+		{pm: "npm", lock: "package-lock.json", cache: "cache: npm"},
+		{pm: "npm", cache: ""},
+		{pm: "yarn", lock: "yarn.lock", cache: "cache: yarn"},
+		{pm: "yarn", cache: ""},
+		{pm: "pnpm", lock: "pnpm-lock.yaml", cache: "cache: pnpm", extra: "pnpm/action-setup@v6"},
+		{pm: "pnpm", lock: "pnpm-lock.yaml", pkg: `,"devEngines":{"packageManager":{"name":"pnpm"}}`, cache: "cache: pnpm", notWant: "version: latest"},
+		{pm: "bun", lock: "bun.lock", cache: "", extra: "oven-sh/setup-bun@v2", notWant: "npm install -g"},
+	} {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"scripts":{"lint":"x","test":"y"}`+tc.pkg+`}`), 0o644)
+		if tc.lock != "" {
+			os.WriteFile(filepath.Join(dir, tc.lock), nil, 0o644)
+		}
+		p := &detect.Project{Root: dir, Stack: "node", PackageManager: tc.pm, HasTests: true,
+			Scripts: map[string]string{"lint": "x", "test": "y"}}
+		got := workflow(t, plan(t, p))
+		parse(t, got)
+		if tc.cache == "" && strings.Contains(got, "cache:") {
+			t.Errorf("%s/%q: unexpected cache:\n%s", tc.pm, tc.lock, got)
+		}
+		if tc.cache != "" && !strings.Contains(got, tc.cache) {
+			t.Errorf("%s: missing %q", tc.pm, tc.cache)
+		}
+		if !strings.Contains(got, tc.pm+" run test") || strings.Contains(got, tc.pm+" test") {
+			t.Errorf("%s: test command wrong:\n%s", tc.pm, got)
+		}
+		if tc.extra != "" && !strings.Contains(got, tc.extra) {
+			t.Errorf("%s: missing %q", tc.pm, tc.extra)
+		}
+		if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+			t.Errorf("%s: unexpected %q", tc.pm, tc.notWant)
+		}
+	}
+}

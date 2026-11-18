@@ -74,9 +74,8 @@ func (*Module) Plan(p *detect.Project, _ *config.Config) ([]engine.Step, error) 
 		if d.Node == "" {
 			d.Node = "lts/*"
 		}
-		d.Cache = d.PM
-		if d.PM == "bun" {
-			d.Cache = "npm"
+		if lock := map[string]string{"npm": "package-lock.json", "pnpm": "pnpm-lock.yaml", "yarn": "yarn.lock"}[d.PM]; lock != "" && exists(p.Root, lock) {
+			d.Cache = d.PM
 		}
 		d.Install = nodeInstall(d.PM, p.Root)
 		d.PMPinned = packageManagerPinned(p.Root)
@@ -153,9 +152,12 @@ func nodeInstall(pm, root string) string {
 func packageManagerPinned(root string) bool {
 	var pkg struct {
 		PackageManager string `json:"packageManager"`
+		DevEngines     struct {
+			PackageManager json.RawMessage `json:"packageManager"`
+		} `json:"devEngines"`
 	}
 	_ = json.Unmarshal([]byte(readFile(root, "package.json")), &pkg)
-	return pkg.PackageManager != ""
+	return pkg.PackageManager != "" || len(pkg.DevEngines.PackageManager) > 0
 }
 
 func readFile(root, name string) string {
