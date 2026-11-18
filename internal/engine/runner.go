@@ -26,8 +26,11 @@ type Cmd struct {
 type ExecRunner struct{}
 
 // Run executes cmd and returns its stdout; on failure the error includes stderr.
+// When ctx is cancelled the command gets SIGINT, not SIGKILL, and Run waits
+// for it to exit: tofu then stops cleanly and saves its state.
 func (ExecRunner) Run(ctx context.Context, cmd Cmd) ([]byte, error) {
 	c := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
+	c.Cancel = func() error { return c.Process.Signal(os.Interrupt) }
 	c.Dir = cmd.Dir
 	if len(cmd.Env) > 0 {
 		c.Env = append(os.Environ(), cmd.Env...)

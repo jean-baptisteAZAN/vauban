@@ -163,3 +163,17 @@ func PlanFooter(w io.Writer) {
 	fmt.Fprintln(w, state)
 	fmt.Fprintln(w, "next: vauban apply")
 }
+
+// DestructivePlan writes a warning title and a tofu plan, with the lines that
+// destroy or replace resources in red when styled.
+func DestructivePlan(w io.Writer, title, plan string) {
+	fmt.Fprintln(w)
+	Warning(w, title)
+	styled := Styled()
+	for _, line := range strings.Split(strings.TrimRight(plan, "\n"), "\n") {
+		if styled && (strings.Contains(line, "destroy") || strings.Contains(line, "must be replaced") || strings.Contains(line, "-/+")) {
+			line = Err.Render(line)
+		}
+		fmt.Fprintln(w, line)
+	}
+}

@@ -37,8 +37,14 @@ func newPlanCmd() *cobra.Command {
 		Long: "Choose a cloud and show every file and command apply would run.\n\n" +
 			"Uses vauban.yaml when it exists (--reconfigure asks again); flags override vauban.yaml.",
 		Args: cobra.NoArgs,
-		RunE: runPlan,
+		RunE: abortable(runPlan),
 	}
+	addConfigFlags(cmd)
+	return cmd
+}
+
+// addConfigFlags adds the flags resolveConfig reads.
+func addConfigFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 	f.String("cloud", "", "cloud provider: scaleway, digitalocean or hetzner")
 	f.String("region", "", "region (default: the provider's)")
@@ -46,7 +52,6 @@ func newPlanCmd() *cobra.Command {
 	f.String("domain", "", "public domain (default: <ip>.sslip.io)")
 	f.Int("port", 0, "port the app listens on (default: from Dockerfile or stack)")
 	f.Bool("reconfigure", false, "ask again even if vauban.yaml exists")
-	return cmd
 }
 
 func runPlan(cmd *cobra.Command, _ []string) error {
@@ -68,6 +73,9 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := c.Save(root); err != nil {
+		return err
+	}
 
 	w := cmd.OutOrStdout()
 	writeConfigSummary(w, p, c)
@@ -80,8 +88,10 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// resolveConfig returns vauban.yaml, or builds it from flags or prompts, and
-// saves it. Explicit flags override values from an existing vauban.yaml.
+// resolveConfig returns vauban.yaml, or builds it from flags or prompts. It
+// does not save it: callers do once the plan builds. Explicit flags override
+// values from an existing vauban.yaml; a different --cloud resets region and
+// size to the new provider's defaults unless they are passed too.
 func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error) {
 	f := cmd.Flags()
 	reconfigure, _ := f.GetBool("reconfigure")
@@ -101,6 +111,14 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	}
 	if f.Changed("port") {
 		c.AppPort, _ = f.GetInt("port")
+	}
+	if existing != nil && c.Cloud != existing.Cloud {
+		if !f.Changed("region") {
+			c.Region = ""
+		}
+		if !f.Changed("size") {
+			c.Size = ""
+		}
 	}
 
 	if existing == nil || reconfigure {
@@ -125,9 +143,6 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", config.FileName, err)
-	}
-	if err := c.Save(p.Root); err != nil {
-		return nil, err
 	}
 	return c, nil
 }
@@ -282,24 +297,39 @@ func (pl *planned) items(root string, force bool) []ui.PlanGroup {
 	return groups
 }
 
-// planItem classifies a step: done, secret, file (write or skip), command,
-// or other. Files are recognised by a "write <path>" description.
+// kinded is implemented by custom steps that render like a built-in step
+// (engine.KindWrite or engine.KindCommand).
+type kinded interface{ Kind() string }
+
+// planItem classifies a step by its type: done, secret, file (write or skip),
+// command, or other.
 func planItem(s engine.Step, root string, st *engine.State, overwrite bool) ui.PlanItem {
 	d := s.Describe()
 	if st.Done[s.ID()] {
 		return ui.PlanItem{Kind: ui.PlanDone, Text: d}
 	}
-	if _, ok := s.(engine.SetSecret); ok {
-		return ui.PlanItem{Kind: ui.PlanSecret, Text: d}
-	}
-	if path, ok := strings.CutPrefix(d, "write "); ok {
+	file := func(path string) ui.PlanItem {
 		if _, err := os.Stat(filepath.Join(root, path)); err == nil && !overwrite {
 			return ui.PlanItem{Kind: ui.PlanSkip, Text: path}
 		}
 		return ui.PlanItem{Kind: ui.PlanWrite, Text: path}
 	}
-	if label, line, ok := strings.Cut(d, "$ "); ok {
-		return ui.PlanItem{Kind: ui.PlanCommand, Text: line, Note: strings.TrimSuffix(strings.TrimSpace(label), ":")}
+	switch s := s.(type) {
+	case engine.SetSecret:
+		return ui.PlanItem{Kind: ui.PlanSecret, Text: d}
+	case engine.WriteFile:
+		return file(s.Path)
+	case engine.RunCommand:
+		return ui.PlanItem{Kind: ui.PlanCommand, Text: strings.Join(append([]string{s.Cmd.Name}, s.Cmd.Args...), " "), Note: s.Label}
+	case kinded:
+		switch s.Kind() {
+		case engine.KindWrite:
+			return file(strings.TrimPrefix(d, "write "))
+		case engine.KindCommand:
+			if label, line, ok := strings.Cut(d, "$ "); ok {
+				return ui.PlanItem{Kind: ui.PlanCommand, Text: line, Note: strings.TrimSuffix(strings.TrimSpace(label), ":")}
+			}
+		}
 	}
 	return ui.PlanItem{Kind: ui.PlanOther, Text: d}
 }

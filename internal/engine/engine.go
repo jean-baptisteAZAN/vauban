@@ -50,6 +50,39 @@ type Env struct {
 	// Confirm asks the user to approve a risky step (title, then details such
 	// as a plan). Steps that need it treat nil as "not confirmed".
 	Confirm func(title, details string) (bool, error)
+	// Progress, when set, is told as Execute skips (already done), starts,
+	// finishes or fails each step. err is set only for PhaseFail.
+	Progress func(id, describe string, phase Phase, err error)
+}
+
+// Phase is a step's progress through Execute.
+type Phase int
+
+const (
+	PhaseStart Phase = iota // about to apply
+	PhaseDone               // applied and saved
+	PhaseSkip               // already done in state
+	PhaseFail               // apply or save failed
+)
+
+func (p Phase) String() string {
+	switch p {
+	case PhaseStart:
+		return "start"
+	case PhaseDone:
+		return "done"
+	case PhaseSkip:
+		return "skip"
+	case PhaseFail:
+		return "fail"
+	}
+	return "unknown"
+}
+
+func (e *Env) progress(s Step, phase Phase, err error) {
+	if e.Progress != nil {
+		e.Progress(s.ID(), s.Describe(), phase, err)
+	}
 }
 
 // ErrNotConfirmed is returned by a step whose risky action was not approved.
@@ -137,10 +170,13 @@ func Execute(ctx context.Context, steps []Step, st *State, env *Env) error {
 		}
 		id := s.ID()
 		if st.Done[id] {
+			env.progress(s, PhaseSkip, nil)
 			continue
 		}
+		env.progress(s, PhaseStart, nil)
 		out, err := s.Apply(ctx, env)
 		if err != nil {
+			env.progress(s, PhaseFail, err)
 			return fmt.Errorf("%s: %w", id, err)
 		}
 		for k, v := range out {
@@ -149,8 +185,10 @@ func Execute(ctx context.Context, steps []Step, st *State, env *Env) error {
 		}
 		st.Done[id] = true
 		if err := st.Save(env.Root); err != nil {
+			env.progress(s, PhaseFail, err)
 			return fmt.Errorf("%s: save state: %w", id, err)
 		}
+		env.progress(s, PhaseDone, nil)
 	}
 	return nil
 }

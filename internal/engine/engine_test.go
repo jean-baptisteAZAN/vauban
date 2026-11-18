@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/detect"
@@ -218,5 +219,46 @@ func TestExecuteNilConfirmUnusedByUngatedSteps(t *testing.T) {
 	}
 	if ErrNotConfirmed == nil || ErrNotConfirmed.Error() != "not confirmed" {
 		t.Fatalf("ErrNotConfirmed = %v", ErrNotConfirmed)
+	}
+}
+
+func TestExecuteReportsProgress(t *testing.T) {
+	root := t.TempDir()
+	var n int
+	st := &State{Done: map[string]bool{"m:done": true}}
+	var got []string
+	env := &Env{Root: root, Progress: func(id, describe string, phase Phase, err error) {
+		line := id + " " + describe + " " + phase.String()
+		if err != nil {
+			line += " " + err.Error()
+		}
+		got = append(got, line)
+	}}
+	err := Execute(context.Background(), []Step{
+		countStep{id: "m:done", calls: &n},
+		countStep{id: "m:ok", calls: &n},
+		countStep{id: "m:bad", calls: &n, err: errors.New("boom")},
+	}, st, env)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	want := []string{
+		"m:done m:done skip",
+		"m:ok m:ok start",
+		"m:ok m:ok done",
+		"m:bad m:bad start",
+		"m:bad m:bad fail boom",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("progress = %q, want %q", got, want)
+	}
+}
+
+func TestExecRunnerInterruptsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	out, _ := ExecRunner{}.Run(ctx, Cmd{Name: "sh", Args: []string{"-c", `trap 'echo graceful; exit 1' INT; sleep 5 >/dev/null 2>&1 & wait`}})
+	if !strings.Contains(string(out), "graceful") {
+		t.Fatalf("command was not interrupted gracefully, stdout %q", out)
 	}
 }

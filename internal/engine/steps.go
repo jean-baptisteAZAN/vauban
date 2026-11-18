@@ -135,3 +135,11 @@ func (s SetSecret) value(env *Env) ([]byte, error) {
 	}
 	return b, nil
 }
+
+// Kinds a custom step may report through an optional Kind() string method so
+// plan output renders it like a built-in step. Its Describe must then read
+// "write <path>" (KindWrite) or "[<label>: ]$ <command line>" (KindCommand).
+const (
+	KindWrite   = "write"
+	KindCommand = "command"
+)

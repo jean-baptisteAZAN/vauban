@@ -15,6 +15,7 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
+	"github.com/jean-baptisteAZAN/vauban/internal/ui"
 )
 
 const planToken = "hcloud-plan-secret"
@@ -381,5 +382,129 @@ func TestDefaultPort(t *testing.T) {
 	}
 	if c.AppPort != 3000 {
 		t.Errorf("node default port = %d, want 3000", c.AppPort)
+	}
+}
+
+// doProvider stands in for digitalocean without network access.
+type doProvider struct{ planProvider }
+
+func (*doProvider) ID() string            { return "digitalocean" }
+func (*doProvider) DefaultRegion() string { return "fra1" }
+func (*doProvider) DefaultSize() string   { return "s-1vcpu-1gb" }
+
+func TestPlanCloudChangeResetsRegionAndSize(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	t.Cleanup(cloud.Register(&doProvider{}))
+	const existing = "project: shop\ncloud: hetzner\nregion: fsn1\nsize: cx33\napp_port: 8080\n"
+
+	writeFile(t, root, config.FileName, existing)
+	if out, err := execPlan(t, root, "--cloud", "digitalocean"); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	c, err := config.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cloud != "digitalocean" || c.Region != "fra1" || c.Size != "s-1vcpu-1gb" {
+		t.Errorf("cloud change kept old region/size: %+v", c)
+	}
+
+	writeFile(t, root, config.FileName, existing)
+	if out, err := execPlan(t, root, "--cloud", "digitalocean", "--region", "ams3"); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if c, err = config.Load(root); err != nil {
+		t.Fatal(err)
+	}
+	if c.Region != "ams3" || c.Size != "s-1vcpu-1gb" {
+		t.Errorf("explicit --region not kept or size not reset: %+v", c)
+	}
+
+	writeFile(t, root, config.FileName, existing)
+	if out, err := execPlan(t, root, "--cloud", "hetzner"); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if c, err = config.Load(root); err != nil {
+		t.Fatal(err)
+	}
+	if c.Region != "fsn1" || c.Size != "cx33" {
+		t.Errorf("same cloud reset region/size: %+v", c)
+	}
+}
+
+func TestPlanDoesNotSaveConfigWhenPlanFails(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err == nil || !strings.Contains(err.Error(), "GitHub remote") {
+		t.Fatalf("want deploy remote error, got %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, config.FileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("vauban.yaml saved although the plan failed")
+	}
+}
+
+func TestPlanInfraSectionRendering(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	home, _ := os.UserHomeDir()
+	want := "infra\n" +
+		`  $ ssh-keygen -t ed25519 -N "" -C vauban-shop -f ` + filepath.Join(home, ".ssh", "vauban_shop_ed25519") + "  (deploy key)\n" +
+		"  + write infra/main.tf\n" +
+		"  + write infra/cloud-init.yaml\n" +
+		"  + write infra/.gitignore\n" +
+		"  $ tofu -chdir=infra init -input=false\n" +
+		"  $ tofu -chdir=infra plan -input=false -no-color -out=tfplan && tofu -chdir=infra show -json tfplan\n" +
+		"  $ tofu -chdir=infra apply -input=false tfplan\n" +
+		"  $ tofu -chdir=infra output -json\n" +
+		"\ndeploy\n" +
+		"  + write deploy/compose.yaml\n" +
+		"  + write deploy/Caddyfile\n" +
+		"  + write .github/workflows/deploy.yml\n" +
+		"  + deploy domain: <server_ip>.sslip.io\n"
+	for _, w := range []string{want, "\n10 to write · 5 to run · 3 secrets · 1 other\n"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("rendering changed; want\n%s\nin:\n%s", w, out)
+		}
+	}
+
+	writeFile(t, root, "infra/cloud-init.yaml", "#cloud-config\n")
+	if out, err = execPlan(t, root); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "  · skip infra/cloud-init.yaml (exists)\n") {
+		t.Errorf("existing cloud-init not shown as skipped:\n%s", out)
+	}
+}
+
+// writeLike describes itself like a file write but is not one.
+type writeLike struct{}
+
+func (writeLike) ID() string                                                 { return "x:y" }
+func (writeLike) Describe() string                                           { return "write notes about $ money" }
+func (writeLike) Apply(context.Context, *engine.Env) (engine.Outputs, error) { return nil, nil }
+
+type kindWrite struct{ writeLike }
+
+func (kindWrite) Describe() string { return "write a/b.txt" }
+func (kindWrite) Kind() string     { return engine.KindWrite }
+
+func TestPlanItemClassifiesByType(t *testing.T) {
+	st := &engine.State{Done: map[string]bool{}}
+	root := t.TempDir()
+	if got := planItem(writeLike{}, root, st, false); got.Kind != ui.PlanOther || got.Text != "write notes about $ money" {
+		t.Errorf("writeLike = %+v, want PlanOther", got)
+	}
+	if got := planItem(kindWrite{}, root, st, false); got.Kind != ui.PlanWrite || got.Text != "a/b.txt" {
+		t.Errorf("kindWrite = %+v, want PlanWrite a/b.txt", got)
+	}
+	rc := engine.RunCommand{StepID: "x:z", Label: "lbl", Cmd: engine.Cmd{Name: "echo", Args: []string{"hi"}}}
+	if got := planItem(rc, root, st, false); got.Kind != ui.PlanCommand || got.Text != "echo hi" || got.Note != "lbl" {
+		t.Errorf("RunCommand = %+v", got)
 	}
 }
