@@ -83,9 +83,11 @@ func TestVariants(t *testing.T) {
 		absent []string
 	}{
 		{"node-npm", detect.Project{Stack: "node", PackageManager: "npm"},
-			[]string{"FROM node:" + defaultNode + "-slim", `CMD ["npm", "start"]`}, []string{"corepack"}},
+			[]string{"FROM node:" + defaultNode + "-slim", `CMD ["npm", "start"]`, "npm prune --omit=dev"}, []string{"corepack"}},
 		{"node-yarn", detect.Project{Stack: "node", PackageManager: "yarn", LangVersion: "20"},
-			[]string{"FROM node:20-slim", "corepack enable", `CMD ["yarn", "start"]`}, nil},
+			[]string{"FROM node:20-slim", "corepack enable", "yarn install --frozen-lockfile", `CMD ["npm", "start"]`}, []string{"--immutable"}},
+		{"node-pnpm", detect.Project{Stack: "node", PackageManager: "pnpm"},
+			[]string{"corepack enable", "pnpm install --frozen-lockfile", "pnpm prune --prod", `CMD ["npm", "start"]`}, nil},
 		{"python-pip", detect.Project{Stack: "python", PackageManager: "pip"},
 			[]string{"FROM python:" + defaultPython + "-slim", "pip install"}, []string{"astral-sh/uv"}},
 		{"go-default", detect.Project{Stack: "go", PackageManager: "go"},
@@ -107,6 +109,29 @@ func TestVariants(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNodeFinalStageNoCorepack(t *testing.T) {
+	for _, pm := range []string{"npm", "pnpm", "yarn", "bun"} {
+		got := dockerfile(t, &detect.Project{Stack: "node", PackageManager: pm, Root: t.TempDir()})
+		final := got[strings.LastIndex(got, "FROM "):]
+		if strings.Contains(final, "corepack") || !strings.Contains(final, `CMD ["npm", "start"]`) {
+			t.Errorf("%s final stage:\n%s", pm, final)
+		}
+	}
+}
+
+func TestYarnBerry(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".yarnrc.yml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := dockerfile(t, &detect.Project{Stack: "node", PackageManager: "yarn", Root: root})
+	for _, w := range []string{"yarn install --immutable", "yarn workspaces focus --all --production", ".yarnrc.yml"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in:\n%s", w, got)
+		}
 	}
 }
 

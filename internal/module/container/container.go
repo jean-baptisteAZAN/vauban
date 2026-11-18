@@ -53,6 +53,7 @@ func (*Module) Detect(p *detect.Project) engine.Status {
 
 type data struct {
 	Version, PM, Port, UV, Entry, Lock string
+	Berry                               bool
 }
 
 func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) {
@@ -64,6 +65,7 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	case "node":
 		name, d.Version = "node", orDefault(p.LangVersion, defaultNode)
 		d.Lock = nodeLock(p.PackageManager)
+		d.Berry = p.PackageManager == "yarn" && exists(p.Root, ".yarnrc.yml")
 	case "python":
 		name, d.Version = "python", orDefault(p.LangVersion, defaultPython)
 		d.Entry = "app.py"
