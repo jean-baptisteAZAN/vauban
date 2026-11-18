@@ -64,7 +64,6 @@ func TestScalewayTerraformGolden(t *testing.T) {
 		`name = "my-app-prod"`,
 		`type              = "PLAY2-PICO"`,
 		`image             = "debian_trixie"`,
-		`resource "scaleway_iam_ssh_key" "vauban"`,
 		`type = "routed_ipv4"`, `type = "routed_ipv6"`,
 		`ip_ids            = [scaleway_instance_ip.ipv4.id, scaleway_instance_ip.ipv6.id]`,
 		`security_group_id = scaleway_instance_security_group.vauban.id`,
@@ -76,10 +75,16 @@ func TestScalewayTerraformGolden(t *testing.T) {
 		`ip_range = "0.0.0.0/0"`, `ip_range = "::/0"`,
 		`protocol = "UDP"`,
 		`output "server_ip"`, `output "server_ipv6"`,
-		"me@laptop", "vauban-deploy",
 	} {
 		if !strings.Contains(s, w) {
 			t.Errorf("missing %q", w)
+		}
+	}
+	// The deploy key reaches the VM through cloud-init only: an IAM SSH key
+	// would be project-wide and land on every instance of the project.
+	for _, w := range []string{"scaleway_iam_ssh_key", "me@laptop", "vauban-deploy"} {
+		if strings.Contains(s, w) {
+			t.Errorf("unexpected %q", w)
 		}
 	}
 	for p, n := range map[string]int{`port     = 22`: 2, `port     = 80`: 2, `port     = 443`: 4} { // IPv4+IPv6 (+UDP for 443)
@@ -105,7 +110,6 @@ func TestScalewayTerraformErrors(t *testing.T) {
 		"no region":  func(in *TFInput) { in.Region = "" },
 		"bad region": func(in *TFInput) { in.Region = "paris" },
 		"no size":    func(in *TFInput) { in.Size = "" },
-		"no keys":    func(in *TFInput) { in.SSHPublicKeys = nil },
 	} {
 		in := ok
 		mut(&in)

@@ -178,19 +178,42 @@ func (m stepModel) View() tea.View {
 	return tea.NewView(m.spin.View() + " " + m.text)
 }
 
-// ApplyFooter writes the success line and the commit hint.
-func ApplyFooter(w io.Writer, domain string) {
-	const next = `next: git add -A && git commit -m "chore: vauban setup" && git push`
+// Footer is what apply reports once every step succeeded.
+type Footer struct {
+	Domain string   // the public domain, "" if unknown
+	DNS    []string // records the user must create, e.g. "A example.com → 1.2.3.4"
+	// Redeploy: only files, the domain or secrets changed (no infra change),
+	// so a push redeploys.
+	Redeploy bool
+}
+
+// ApplyFooter writes the success line, the DNS records to create and the
+// next git command.
+func ApplyFooter(w io.Writer, f Footer) {
+	next := `next: git add -A && git commit -m "chore: vauban setup" && git push`
+	if f.Redeploy {
+		next = `push to redeploy: git add -A && git commit -m "chore: vauban update" && git push`
+	}
 	url := ""
-	if domain != "" {
-		url = " · https://" + domain
+	if f.Domain != "" {
+		url = " · https://" + f.Domain
 	}
 	fmt.Fprintln(w)
-	if Styled() {
+	styled := Styled()
+	if styled {
 		fmt.Fprintln(w, OK.Render("✓ ready")+url)
-		fmt.Fprintln(w, Muted.Render(next))
-		return
+	} else {
+		fmt.Fprintln(w, "[ok] ready"+url)
 	}
-	fmt.Fprintln(w, "[ok] ready"+url)
+	for _, r := range f.DNS {
+		line := "DNS: create " + r
+		if styled {
+			line = Warn.Render(line)
+		}
+		fmt.Fprintln(w, line)
+	}
+	if styled {
+		next = Muted.Render(next)
+	}
 	fmt.Fprintln(w, next)
 }

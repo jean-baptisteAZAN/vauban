@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
 	"strings"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/detect"
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 	"github.com/jean-baptisteAZAN/vauban/internal/ui"
@@ -18,7 +20,7 @@ import (
 
 var (
 	errNeedTTY      = errors.New("apply needs a terminal or --yes")
-	errNotConfirmed = errors.New("destructive infra change not confirmed — nothing was applied; rerun and type the project name (or pass --force)")
+	errNotConfirmed = errors.New("destructive infra change not confirmed — nothing was applied; rerun and type the project name (or pass --confirm <project>)")
 	errInterrupted  = errors.New("interrupted — rerun `vauban apply` to resume")
 )
 
@@ -28,12 +30,14 @@ func newApplyCmd() *cobra.Command {
 		Short: "Write the files, create the server and wire deploys, as shown by plan",
 		Long: "Write the files, create the server and wire deploys, as shown by plan.\n\n" +
 			"Asks before starting (--yes skips that). Destroying or replacing cloud resources\n" +
-			"always needs the project name typed in a terminal, or --force.\n" +
+			"always needs the project name typed in a terminal, or --confirm <project>;\n" +
+			"--yes and --force (which only overwrites generated files) do not approve it.\n" +
 			"Interrupted runs resume where they stopped.",
 		Args: cobra.NoArgs,
 		RunE: abortable(runApply),
 	}
 	addConfigFlags(cmd)
+	cmd.Flags().String("confirm", "", "the project name, to approve destroying or replacing resources without a terminal")
 	return cmd
 }
 
@@ -59,6 +63,13 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	c, err := resolveConfig(cmd, p)
 	if err != nil {
 		return err
+	}
+	confirmed := false
+	if f.Changed("confirm") {
+		if typed, _ := f.GetString("confirm"); typed != c.Project {
+			return &ExitError{Code: 2, Err: fmt.Errorf("--confirm %q does not match project %q — nothing was applied", typed, c.Project)}
+		}
+		confirmed = true
 	}
 	pl, err := preparePlan(root, c, force)
 	if err != nil {
@@ -98,9 +109,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		Force:    force,
 		Run:      sig.runner(cmdRunner),
 		Log:      prog.Log(),
-		Confirm:  confirmDestructive(ctx, w, prog, c.Project, force, tty),
+		Confirm:  confirmDestructive(ctx, w, prog, c.Project, confirmed, tty),
 		Progress: prog.Update,
 	}
+	before := maps.Clone(pl.st.Done)
 	err = engine.Execute(ctx, pl.steps(), pl.st, env)
 	prog.Pause()
 	switch {
@@ -113,19 +125,47 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	case err != nil:
 		return err
 	}
-	ui.ApplyFooter(w, pl.st.Outputs["domain"])
+	ui.ApplyFooter(w, footer(c, pl.st, before))
 	return nil
 }
 
+// footer describes the finished run from the final state: the domain, the
+// DNS records a custom domain needs, and whether only files, the domain or
+// secrets changed (steps newly done since before) so a push redeploys.
+func footer(c *config.Config, st *engine.State, before map[string]bool) ui.Footer {
+	f := ui.Footer{Domain: st.Outputs["domain"]}
+	if c.Domain != "" {
+		if ip := st.Outputs["server_ip"]; ip != "" {
+			f.DNS = append(f.DNS, "A "+c.Domain+" → "+ip)
+		}
+		if ip6 := st.Outputs["server_ipv6"]; ip6 != "" {
+			f.DNS = append(f.DNS, "AAAA "+c.Domain+" → "+ip6)
+		}
+	}
+	changed := false
+	for id := range st.Done {
+		if before[id] {
+			continue
+		}
+		if id == "infra:apply" {
+			return f
+		}
+		changed = changed || strings.HasPrefix(id, "file:") || strings.HasPrefix(id, "deploy:") || strings.HasPrefix(id, "secret:")
+	}
+	f.Redeploy = changed
+	return f
+}
+
 // confirmDestructive is env.Confirm for apply. It always shows the plan,
-// then approves with --force, else asks for the project name in a terminal,
-// else refuses. --yes does not approve destruction.
-func confirmDestructive(ctx context.Context, w io.Writer, prog *ui.Progress, project string, force, tty bool) func(title, details string) (bool, error) {
+// then approves with a matching --confirm <project> (confirmed), else asks
+// for the project name in a terminal, else refuses. --yes and --force do
+// not approve destruction.
+func confirmDestructive(ctx context.Context, w io.Writer, prog *ui.Progress, project string, confirmed, tty bool) func(title, details string) (bool, error) {
 	return func(title, details string) (bool, error) {
 		prog.Pause()
 		ui.DestructivePlan(w, title, details)
-		if force {
-			ui.Warning(w, "--force: going ahead without typed confirmation")
+		if confirmed {
+			ui.Warning(w, "--confirm "+project+": going ahead without typed confirmation")
 			return true, nil
 		}
 		if !tty {

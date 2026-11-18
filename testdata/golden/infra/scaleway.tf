@@ -14,20 +14,11 @@ provider "scaleway" {
   region = "fr-par"
 }
 
+# SSH keys reach the instance through cloud-init only: Scaleway IAM SSH keys
+# are project-wide and would be installed on every instance of the project.
 locals {
   name = "my-app-prod"
   tags = ["vauban"]
-  ssh_public_keys = [
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDeployKeyDeployKeyDeployKeyDeployKey vauban-deploy",
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAuthorKeyAuthorKeyAuthorKeyAuthorKe me@laptop",
-  ]
-}
-
-# Project SSH keys are injected into the instance at boot.
-resource "scaleway_iam_ssh_key" "vauban" {
-  count      = length(local.ssh_public_keys)
-  name       = "${local.name}-${count.index}"
-  public_key = local.ssh_public_keys[count.index]
 }
 
 resource "scaleway_instance_ip" "ipv4" {
@@ -120,8 +111,6 @@ resource "scaleway_instance_server" "vauban" {
   lifecycle {
     ignore_changes = [user_data]
   }
-
-  depends_on = [scaleway_iam_ssh_key.vauban]
 }
 
 output "server_ip" {

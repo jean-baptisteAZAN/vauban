@@ -184,6 +184,33 @@ func TestStateFileMode(t *testing.T) {
 	}
 }
 
+// .vauban/ is never committed: Save keeps a .gitignore ignoring everything.
+func TestStateSaveWritesGitignore(t *testing.T) {
+	root := t.TempDir()
+	gi := filepath.Join(root, ".vauban", ".gitignore")
+	for range 2 { // idempotent
+		if err := (&State{}).Save(root); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		b, err := os.ReadFile(gi)
+		if err != nil {
+			t.Fatalf("read .gitignore: %v", err)
+		}
+		if string(b) != "*\n" {
+			t.Fatalf(".gitignore = %q, want %q", b, "*\n")
+		}
+	}
+	if err := os.WriteFile(gi, []byte("state.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&State{}).Save(root); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if b, _ := os.ReadFile(gi); string(b) != "*\n" {
+		t.Fatalf(".gitignore not restored: %q", b)
+	}
+}
+
 func TestLoadStateAbsent(t *testing.T) {
 	st, err := LoadState(t.TempDir())
 	if err != nil {

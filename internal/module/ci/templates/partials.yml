@@ -38,8 +38,16 @@
       - uses: actions/setup-python@v7
         with:
           python-version: "{{.Python}}"
+{{- if .Poetry}}
+      - run: pipx install poetry
+      - run: poetry install
+{{- else}}
 {{- if .Reqs}}
       - run: pip install -r requirements.txt
+{{- end}}
+{{- if .Pkg}}
+      - run: pip install .
+{{- end}}
 {{- end}}
 {{- end}}
 {{- end}}

@@ -533,3 +533,18 @@ func TestPlanAfterDestroyShowsRerender(t *testing.T) {
 		t.Errorf("want main.tf write and no drift section:\n%s", out)
 	}
 }
+
+func TestPlanCustomDomainDNSHint(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	out, err := execPlan(t, root, "--cloud", "hetzner", "--domain", "shop.example.com")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "DNS: point shop.example.com to the server IP (shown after apply)\n") {
+		t.Errorf("missing DNS hint in:\n%s", out)
+	}
+	root, _ = planEnv(t, "go-app")
+	if out, _ = execPlan(t, root, "--cloud", "hetzner"); strings.Contains(out, "DNS:") {
+		t.Errorf("DNS hint without a domain:\n%s", out)
+	}
+}

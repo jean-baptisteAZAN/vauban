@@ -85,3 +85,34 @@ func TestGitRepoDetection(t *testing.T) {
 		t.Errorf("got %+v", p)
 	}
 }
+
+func writeTemp(t *testing.T, dir, name, content string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// npm init's placeholder test script is not a test suite. Node tests run
+// through the test script, so a tests/ directory alone does not count.
+func TestNodePlaceholderTestScript(t *testing.T) {
+	for script, want := range map[string]bool{
+		`echo \"Error: no test specified\" && exit 1`: false,
+		`vitest run`: true,
+	} {
+		dir := t.TempDir()
+		writeTemp(t, dir, "package.json", `{"scripts":{"test":"`+script+`"}}`)
+		writeTemp(t, dir, "test/a.test.js", "")
+		p, err := Scan(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.HasTests != want {
+			t.Errorf("test script %q: HasTests = %v, want %v", script, p.HasTests, want)
+		}
+	}
+}

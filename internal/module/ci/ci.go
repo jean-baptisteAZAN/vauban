@@ -52,8 +52,9 @@ type data struct {
 	PM, Node, Cache, Install string
 	PMPinned                 bool
 	// python
-	UV, Ruff, Pytest, Reqs bool
-	Python                 string
+	UV, Poetry, Ruff, Pytest bool
+	Reqs, Pkg                bool // pip: requirements.txt, an installable project
+	Python                   string
 }
 
 func (*Module) Plan(p *detect.Project, _ *config.Config) ([]engine.Step, error) {
@@ -85,6 +86,7 @@ func (*Module) Plan(p *detect.Project, _ *config.Config) ([]engine.Step, error) 
 	case "python":
 		name = "python"
 		d.UV = p.PackageManager == "uv"
+		d.Poetry = p.PackageManager == "poetry"
 		d.Python = p.LangVersion
 		if d.Python == "" {
 			d.Python = "3.x"
@@ -94,6 +96,7 @@ func (*Module) Plan(p *detect.Project, _ *config.Config) ([]engine.Step, error) 
 		d.Ruff = strings.Contains(pyproject, "ruff")
 		d.Pytest = strings.Contains(pyproject, "pytest")
 		d.Reqs = exists(p.Root, "requirements.txt")
+		d.Pkg = exists(p.Root, "pyproject.toml") || exists(p.Root, "setup.py")
 		lintFile, lintTpl = "ruff.toml", "ruff.toml"
 	default:
 		return nil, errors.New("unsupported stack: ci supports go, node and python")

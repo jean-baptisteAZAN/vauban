@@ -23,6 +23,9 @@ services:
     image: <% .Image %>:${IMAGE_TAG:?IMAGE_TAG must be set}
     restart: unless-stopped
     env_file: .env
+    # The app must listen on 0.0.0.0:$PORT.
+    environment:
+      PORT: "${APP_PORT}"
 
 volumes:
   caddy_data:

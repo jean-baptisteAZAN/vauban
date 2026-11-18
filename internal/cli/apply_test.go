@@ -183,7 +183,7 @@ func TestApplyDestructiveNotConfirmedExit3(t *testing.T) {
 	fr.Responses[tofuShowCmd] = []byte(replaceJSON)
 	fr.Responses[tofuPlanCmd] = []byte(replacePlan)
 	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
-	wantExit(t, err, 3, "destructive infra change not confirmed — nothing was applied; rerun and type the project name (or pass --force)", out)
+	wantExit(t, err, 3, "destructive infra change not confirmed — nothing was applied; rerun and type the project name (or pass --confirm <project>)", out)
 	if slices.Contains(callLines(fr), tofuApplyCmd) {
 		t.Errorf("tofu apply ran without confirmation: %q", callLines(fr))
 	}
@@ -197,19 +197,43 @@ func TestApplyDestructiveNotConfirmedExit3(t *testing.T) {
 	}
 }
 
-func TestApplyDestructiveForce(t *testing.T) {
+// --force only overwrites generated files: it never approves destruction.
+func TestApplyDestructiveForceDoesNotApprove(t *testing.T) {
 	root, fr := applyEnv(t)
 	fr.Responses[tofuShowCmd] = []byte(replaceJSON)
 	fr.Responses[tofuPlanCmd] = []byte(replacePlan)
 	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--force", "--cloud", "hetzner")
+	wantExit(t, err, 3, "", out)
+	if slices.Contains(callLines(fr), tofuApplyCmd) {
+		t.Errorf("tofu apply ran with only --force: %q", callLines(fr))
+	}
+}
+
+func TestApplyDestructiveConfirm(t *testing.T) {
+	root, fr := applyEnv(t)
+	fr.Responses[tofuShowCmd] = []byte(replaceJSON)
+	fr.Responses[tofuPlanCmd] = []byte(replacePlan)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--confirm", "shop", "--cloud", "hetzner")
 	if err != nil {
-		t.Fatalf("apply --force: %v\n%s", err, out)
+		t.Fatalf("apply --confirm: %v\n%s", err, out)
 	}
 	if !slices.Contains(callLines(fr), tofuApplyCmd) {
 		t.Errorf("tofu apply not called: %q", callLines(fr))
 	}
 	if !strings.Contains(out, "must be replaced") {
 		t.Errorf("destructive plan not shown:\n%s", out)
+	}
+}
+
+func TestApplyWrongConfirmExit2(t *testing.T) {
+	root, fr := applyEnv(t)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--confirm", "shopp", "--cloud", "hetzner")
+	wantExit(t, err, 2, `--confirm "shopp" does not match project "shop" — nothing was applied`, out)
+	if len(fr.Calls) != 0 {
+		t.Errorf("calls made: %q", callLines(fr))
+	}
+	if _, err := os.Stat(filepath.Join(root, "Dockerfile")); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("Dockerfile written despite wrong --confirm")
 	}
 }
 
@@ -411,5 +435,68 @@ func TestApplyDriftNewIPResetsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(out, "ready · https://"+newDomain+"\n") {
 		t.Errorf("footer does not show the new domain:\n%s", out)
+	}
+}
+
+// With a custom domain, apply prints the DNS records to create.
+func TestApplyCustomDomainPrintsDNS(t *testing.T) {
+	root, fr := applyEnv(t)
+	fr.Responses[tofuOutputCmd] = []byte(`{"server_ip":{"value":"` + testIP + `"},"server_ipv6":{"value":"2001:db8::10"}}`)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner", "--domain", "shop.example.com")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"[ok] ready · https://shop.example.com\n",
+		"DNS: create A shop.example.com → " + testIP + "\n",
+		"DNS: create AAAA shop.example.com → 2001:db8::10\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestApplyCustomDomainNoIPv6(t *testing.T) {
+	root, _ := applyEnv(t)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner", "--domain", "shop.example.com")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "DNS: create A shop.example.com → "+testIP+"\n") || strings.Contains(out, "AAAA") {
+		t.Errorf("want only the A record in:\n%s", out)
+	}
+}
+
+func TestApplySSLipNoDNS(t *testing.T) {
+	root, _ := applyEnv(t)
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "DNS:") {
+		t.Errorf("DNS records printed for sslip.io:\n%s", out)
+	}
+}
+
+// Without infra changes, changed files or domain only need a push.
+func TestApplyRedeployFooter(t *testing.T) {
+	root, _ := applyEnv(t)
+	if out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner"); err != nil {
+		t.Fatalf("first apply: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{{"--domain", "shop.example.com"}, {"--force", "--port", "9090"}} {
+		fr := &engine.FakeRunner{}
+		setRunner(t, fr)
+		out, err := execVauban(t, context.Background(), append([]string{"apply", "--dir", root, "--yes"}, args...)...)
+		if err != nil {
+			t.Fatalf("apply %v: %v\n%s", args, err, out)
+		}
+		if slices.Contains(callLines(fr), tofuApplyCmd) {
+			t.Fatalf("apply %v ran tofu apply", args)
+		}
+		if !strings.Contains(out, "push to redeploy") || strings.Contains(out, "chore: vauban setup") {
+			t.Errorf("apply %v: want the redeploy hint in:\n%s", args, out)
+		}
 	}
 }

@@ -57,7 +57,9 @@ func Scan(root string) (*Project, error) {
 	p.HasTerraform = hasGlob(abs, "*.tf") || hasGlob(filepath.Join(abs, "infra"), "*.tf")
 	detectGit(p)
 	p.HasLintConfig = p.HasLintConfig || detectLint(abs)
-	p.HasTests = p.HasTests || detectTests(abs)
+	if p.Stack != "node" { // node tests run through the test script only
+		p.HasTests = p.HasTests || detectTests(abs)
+	}
 	return p, nil
 }
 

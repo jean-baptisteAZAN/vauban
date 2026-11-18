@@ -24,6 +24,11 @@ jobs:
     steps:{{template "pysetup" .}}
 {{- if .UV}}
       - run: uv run {{if not .Pytest}}--with pytest {{end}}pytest
+{{- else if .Poetry}}
+{{- if not .Pytest}}
+      - run: poetry run pip install pytest
+{{- end}}
+      - run: poetry run pytest
 {{- else}}
       - run: pip install pytest
       - run: pytest

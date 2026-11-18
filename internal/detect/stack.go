@@ -42,7 +42,9 @@ func detectNode(p *Project) {
 	if p.Scripts == nil {
 		p.Scripts = map[string]string{}
 	}
-	if _, ok := p.Scripts["test"]; ok {
+	// npm init's placeholder ("echo \"Error: no test specified\" && exit 1")
+	// is not a test suite.
+	if test, ok := p.Scripts["test"]; ok && !strings.Contains(test, "no test specified") {
 		p.HasTests = true
 	}
 	if len(pkg.ESLintConfig) > 0 {

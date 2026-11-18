@@ -266,3 +266,45 @@ func writeFile(t *testing.T, name string, data []byte, perm os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+// pip installs the project itself when it is a package; poetry installs
+// through poetry and runs the tests in its environment.
+func TestPythonPipAndPoetryInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name, pm  string
+		files     []string
+		want, not []string
+	}{
+		{"pyproject only", "pip", []string{"pyproject.toml"},
+			[]string{"run: pip install .\n"}, []string{"requirements.txt"}},
+		{"setup.py only", "pip", []string{"setup.py"},
+			[]string{"run: pip install .\n"}, []string{"requirements.txt"}},
+		{"requirements only", "pip", []string{"requirements.txt"},
+			[]string{"run: pip install -r requirements.txt\n"}, []string{"pip install .\n"}},
+		{"both", "pip", []string{"pyproject.toml", "requirements.txt"},
+			[]string{"run: pip install -r requirements.txt\n      - run: pip install .\n"}, nil},
+		{"poetry", "poetry", []string{"pyproject.toml", "requirements.txt"},
+			[]string{"run: pipx install poetry\n      - run: poetry install\n", "run: poetry run pip install pytest\n      - run: poetry run pytest\n"},
+			[]string{"pip install .", "pip install -r", "run: pytest\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tc.files {
+				writeFile(t, filepath.Join(dir, f), []byte("\n"), 0o644)
+			}
+			p := &detect.Project{Root: dir, Stack: "python", PackageManager: tc.pm, HasTests: true}
+			got := workflow(t, plan(t, p))
+			parse(t, got)
+			for _, s := range tc.want {
+				if !strings.Contains(got, s) {
+					t.Errorf("missing %q in\n%s", s, got)
+				}
+			}
+			for _, s := range tc.not {
+				if strings.Contains(got, s) {
+					t.Errorf("unexpected %q in\n%s", s, got)
+				}
+			}
+		})
+	}
+}

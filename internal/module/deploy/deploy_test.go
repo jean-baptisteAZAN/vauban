@@ -181,6 +181,9 @@ func TestGoldenFiles(t *testing.T) {
 	if _, ok := caddySvc.Environment["APP_PORT"]; !ok {
 		t.Error("caddy APP_PORT env")
 	}
+	if app.Environment["PORT"] != "${APP_PORT}" { // the app must listen on 0.0.0.0:$PORT
+		t.Errorf("app PORT env = %q", app.Environment["PORT"])
+	}
 	for _, v := range []string{"caddy_data", "caddy_config"} {
 		if _, ok := c.Volumes[v]; !ok {
 			t.Errorf("volume %s not declared", v)

@@ -82,6 +82,10 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	writeConfigSummary(w, p, c)
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
+	if c.Domain != "" {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "DNS: point "+c.Domain+" to the server IP (shown after apply)")
+	}
 	if err := engine.Preflight(pl.p, c, pl.mods); err != nil {
 		ui.Warnings(w, "before apply:", strings.Split(err.Error(), "\n"))
 	}

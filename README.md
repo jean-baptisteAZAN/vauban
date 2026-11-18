@@ -33,9 +33,9 @@ vauban apply    # confirm, then write files, create the VM, push GitHub secrets
 git add -A && git commit -m "ship it" && git push   # vauban never pushes for you
 ```
 
-`plan` saves your answers to `vauban.yaml` (commit it). After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` to `apply` (and `--cloud` if there is no `vauban.yaml`); `destroy` takes `--confirm <project>` instead.
+`plan` saves your answers to `vauban.yaml` (commit it). After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` to `apply` (and `--cloud` if there is no `vauban.yaml`). Anything that destroys or replaces cloud resources needs the project name typed in a terminal, or `--confirm <project>` (`apply` and `destroy`).
 
-Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--domain`, `--port`, `--reconfigure`, `--force`, `--dir <path>`.
+Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--domain`, `--port`, `--reconfigure`, `--force` (overwrite generated files only), `--confirm <project>`, `--dir <path>`.
 
 ## What gets created
 
@@ -50,11 +50,11 @@ Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--
 
 Existing files are never overwritten: they are reported as `skip (exists)` unless you pass `--force`. Every file and command appears in `vauban plan` before `apply` does it.
 
-Without a domain, HTTPS works out of the box on `<ip>.sslip.io`. With one, `plan` prints the DNS A record to create. App secrets: add a GitHub secret named `APP_<NAME>` and the deploy job writes `<NAME>` into `~/app/.env` on the VM (mode 600).
+Without a domain, HTTPS works out of the box on `<ip>.sslip.io`. With one (`--domain`), `apply` prints the DNS records to create once the server exists: an A record to its IPv4 and, when it has one, an AAAA record to its IPv6. App secrets: add a GitHub secret named `APP_<NAME>` and the deploy job writes `<NAME>` into `~/app/.env` on the VM (mode 600).
 
 ## Supported clouds and stacks
 
-Stacks: **Go**, **Node/TypeScript**, **Python**.
+Stacks: **Go**, **Node/TypeScript**, **Python**. Your app must listen on `0.0.0.0:$PORT`: vauban sets `PORT` to `app_port` in the container.
 
 | Cloud | Credentials (first match wins) |
 |---|---|
@@ -72,7 +72,7 @@ GitHub access comes from `gh auth login`. Vauban stores no credentials itself.
 - The app is not published on the host; only Caddy can reach it.
 - When a CI workflow exists, deploys only run after it succeeds on a push to this repository (pull requests and forks cannot deploy); without one, deploy runs on every push to `main`.
 - Images are deployed by immutable commit sha, never `latest`.
-- Changes that destroy or replace cloud resources need the project name typed (or `--force`).
+- Changes that destroy or replace cloud resources need the project name typed (or `--confirm <project>`); `--yes` and `--force` never approve them.
 - No secret value is printed, logged, or written to the repo or to `.vauban/state.json`. The deploy key lives at `~/.ssh/vauban_<project>_ed25519` (0600).
 
 ## Safety and exit codes
@@ -83,8 +83,8 @@ GitHub access comes from `gh auth login`. Vauban stores no credentials itself.
 |---|---|
 | 0 | Success |
 | 1 | Failure, including a failed preflight (nothing was applied) |
-| 2 | Usage problem: `apply` without a terminal and without `--yes`; `destroy` without a terminal and without `--confirm <project>` (or a mismatched name); `plan` with no `vauban.yaml` and no `--cloud` outside a terminal |
-| 3 | Destructive infra change not confirmed (nothing was applied) |
+| 2 | Usage problem: `apply` without a terminal and without `--yes`, or with a mismatched `--confirm`; `destroy` without a terminal and without `--confirm <project>` (or a mismatched name); `plan` with no `vauban.yaml` and no `--cloud` outside a terminal |
+| 3 | Destructive infra change not confirmed (nothing was applied): rerun and type the project name, or pass `--confirm <project>` |
 | 130 | Interrupted (Ctrl-C); state is kept, rerun to resume |
 
 ## Destroy

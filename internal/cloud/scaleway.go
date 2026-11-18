@@ -270,22 +270,17 @@ func (*scaleway) Terraform(in TFInput) ([]byte, error) {
 		return nil, errors.New("scaleway: region (zone) is required")
 	case in.Size == "":
 		return nil, errors.New("scaleway: size is required")
-	case len(in.SSHPublicKeys) == 0:
-		return nil, errors.New("scaleway: at least one SSH public key is required")
 	}
 	m := scalewayZoneRe.FindStringSubmatch(in.Region)
 	if m == nil {
 		return nil, fmt.Errorf("scaleway: invalid zone %q, expected e.g. fr-par-1", in.Region)
 	}
-	keys := make([]string, len(in.SSHPublicKeys))
-	for i, k := range in.SSHPublicKeys {
-		keys[i] = hclString(k)
-	}
+	// in.SSHPublicKeys is not rendered: the deploy key is installed by
+	// cloud-init (ssh_authorized_keys), never as a project-wide IAM key.
 	var buf bytes.Buffer
 	err := scalewayTmpl.Execute(&buf, struct {
 		Version, Name, Zone, Region, Size, Image string
-		Keys                                     []string
-	}{scalewayProviderVersion, hclString(sanitizeName(in.Name)), hclString(in.Region), hclString(m[1]), hclString(in.Size), hclString(scalewayImage), keys})
+	}{scalewayProviderVersion, hclString(sanitizeName(in.Name)), hclString(in.Region), hclString(m[1]), hclString(in.Size), hclString(scalewayImage)})
 	if err != nil {
 		return nil, err
 	}

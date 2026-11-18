@@ -12,6 +12,8 @@ import (
 const (
 	stateDir  = ".vauban"
 	stateFile = "state.json"
+	// stateIgnore keeps everything in .vauban/ out of git.
+	stateIgnore = "*\n"
 )
 
 // State records which steps are done and the non-secret outputs they produced.
@@ -47,7 +49,8 @@ func LoadState(root string) (*State, error) {
 	return st, nil
 }
 
-// Save atomically writes .vauban/state.json (dir 0700, file 0600).
+// Save atomically writes .vauban/state.json (dir 0700, file 0600) and
+// keeps .vauban/.gitignore ignoring the whole directory.
 func (s *State) Save(root string) error {
 	dir := filepath.Join(root, stateDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -55,6 +58,12 @@ func (s *State) Save(root string) error {
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("chmod state dir: %w", err)
+	}
+	gi := filepath.Join(dir, ".gitignore")
+	if b, err := os.ReadFile(gi); err != nil || string(b) != stateIgnore {
+		if err := os.WriteFile(gi, []byte(stateIgnore), 0o644); err != nil {
+			return fmt.Errorf("write state .gitignore: %w", err)
+		}
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
