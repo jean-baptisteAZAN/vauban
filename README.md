@@ -85,7 +85,9 @@ vauban apply    # confirm, then write files, create the VM, push GitHub secrets
 git add -A && git commit -m "ship it" && git push   # vauban never pushes for you
 ```
 
-`plan` saves your answers to `vauban.yaml` (commit it). After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` to `apply` (and `--cloud` if there is no `vauban.yaml`). Anything that destroys or replaces cloud resources needs the project name typed in a terminal, or `--confirm <project>` (`apply` and `destroy`).
+vauban deploys from GitHub Actions, so `plan` and `apply` first check for a GitHub `origin` remote and stop (exit 1) before asking anything if there is none, printing the `gh repo create <name> --private --source . --push` command to create one (it needs at least one commit). `doctor` suggests the same command as its next step.
+
+`plan` saves your answers to `vauban.yaml` (commit it) as soon as they are complete and valid, so they are kept even if the plan then fails. After that `plan` and `apply` are non-interactive and reproducible. Without a terminal, pass `--yes` to `apply` (and `--cloud` if there is no `vauban.yaml`). Anything that destroys or replaces cloud resources needs the project name typed in a terminal, or `--confirm <project>` (`apply` and `destroy`).
 
 Useful flags: `--cloud scaleway|digitalocean|hetzner`, `--region`, `--size`, `--domain`, `--port`, `--reconfigure`, `--force` (overwrite generated files only), `--confirm <project>`, `--dir <path>`. Every command has `--help`.
 
@@ -162,7 +164,7 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Failure, including a failed preflight (nothing was applied) |
+| 1 | Failure, including no GitHub remote or a failed preflight (nothing was applied) |
 | 2 | Usage problem: `apply` without a terminal and without `--yes`, or with a mismatched `--confirm`; `destroy` without a terminal and without `--confirm <project>` (or a mismatched name); `plan` with no `vauban.yaml` and no `--cloud` outside a terminal |
 | 3 | Destructive infra change not confirmed (nothing was applied): rerun and type the project name, or pass `--confirm <project>` |
 | 130 | Interrupted (Ctrl-C); state is kept, rerun to resume |

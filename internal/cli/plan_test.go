@@ -440,17 +440,57 @@ func TestPlanCloudChangeResetsRegionAndSize(t *testing.T) {
 	}
 }
 
-func TestPlanDoesNotSaveConfigWhenPlanFails(t *testing.T) {
+const noRemoteMsg = "no GitHub remote: vauban deploys from GitHub Actions.\n" +
+	"  create one:  git add -A && git commit -m \"init\" && gh repo create shop --private --source . --push\n" +
+	"  or link one: git remote add origin git@github.com:<owner>/<repo>.git"
+
+// Without a GitHub remote, plan stops before resolving or asking the config.
+func TestPlanNoRemoteFailsBeforeAsking(t *testing.T) {
 	root, _ := planEnv(t, "go-app")
-	if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
-		t.Fatal(err)
-	}
-	out, err := execPlan(t, root, "--cloud", "hetzner")
-	if err == nil || !strings.Contains(err.Error(), "GitHub remote") {
-		t.Fatalf("want deploy remote error, got %v\n%s", err, out)
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	writeFile(t, root, ".git/HEAD", "ref: refs/heads/main\n")
+	writeFile(t, root, ".git/refs/heads/main", "0123\n")
+	asked := false
+	oldTTY := interactive
+	interactive = func() bool { asked = true; return false }
+	t.Cleanup(func() { interactive = oldTTY })
+
+	out, err := execPlan(t, root)
+	wantExit(t, err, 1, noRemoteMsg, out)
+	if asked {
+		t.Error("config resolved before the remote check")
 	}
 	if _, err := os.Stat(filepath.Join(root, config.FileName)); !errors.Is(err, fs.ErrNotExist) {
-		t.Error("vauban.yaml saved although the plan failed")
+		t.Error("vauban.yaml written without a remote")
+	}
+}
+
+func TestPlanNoRemoteNoCommits(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	writeFile(t, root, ".git/HEAD", "ref: refs/heads/main\n")
+	out, err := execPlan(t, root, "--cloud", "hetzner")
+	wantExit(t, err, 1, "", out)
+	if !strings.HasPrefix(err.Error(), noRemoteMsg) || !strings.Contains(err.Error(), "gh repo create --push needs at least one commit") {
+		t.Errorf("unexpected message:\n%s", err)
+	}
+}
+
+// Answers are saved once validated, even when the plan then fails.
+func TestPlanSavesConfigBeforePlanFails(t *testing.T) {
+	root, _ := planEnv(t, "go-app")
+	t.Cleanup(cloud.Register(&doProvider{}))
+	saveState(t, root, staleState()) // hetzner applied
+	out, err := execPlan(t, root, "--cloud", "digitalocean")
+	if err == nil || !strings.Contains(err.Error(), "changing cloud") {
+		t.Fatalf("want cloud change error, got %v\n%s", err, out)
+	}
+	c, err := config.Load(root)
+	if err != nil {
+		t.Fatalf("vauban.yaml not saved: %v", err)
+	}
+	if c.Cloud != "digitalocean" || c.Region != "fra1" {
+		t.Errorf("saved config %+v", c)
 	}
 }
 

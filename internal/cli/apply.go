@@ -60,8 +60,15 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireRemote(p); err != nil {
+		return err
+	}
 	c, err := resolveConfig(cmd, p)
 	if err != nil {
+		return err
+	}
+	// Saved before the plan builds, so answers survive a failing plan.
+	if err := c.Save(root); err != nil {
 		return err
 	}
 	confirmed := false
@@ -73,9 +80,6 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 	pl, err := preparePlan(root, c, force)
 	if err != nil {
-		return err
-	}
-	if err := c.Save(root); err != nil {
 		return err
 	}
 

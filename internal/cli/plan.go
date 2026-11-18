@@ -66,15 +66,19 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireRemote(p); err != nil {
+		return err
+	}
 	c, err := resolveConfig(cmd, p)
 	if err != nil {
 		return err
 	}
-	pl, err := preparePlan(root, c, force)
-	if err != nil {
+	// Saved before the plan builds, so answers survive a failing plan.
+	if err := c.Save(root); err != nil {
 		return err
 	}
-	if err := c.Save(root); err != nil {
+	pl, err := preparePlan(root, c, force)
+	if err != nil {
 		return err
 	}
 
@@ -94,7 +98,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 }
 
 // resolveConfig returns vauban.yaml, or builds it from flags or prompts. It
-// does not save it: callers do once the plan builds. Explicit flags override
+// does not save it: callers do as soon as it is returned (validated). Explicit flags override
 // values from an existing vauban.yaml; a different --cloud resets region and
 // size to the new provider's defaults unless they are passed too.
 func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error) {

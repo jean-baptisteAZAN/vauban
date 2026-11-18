@@ -80,5 +80,9 @@ func writeDoctor(w io.Writer, p *detect.Project, mods []engine.Module, ts []tool
 		parts = append(parts, s)
 	}
 	ui.Row(w, "tools", strings.Join(parts, "  "))
-	ui.Row(w, "next", "vauban plan")
+	next := "vauban plan"
+	if p.GitHubRepo == "" {
+		next = createRepoCmd(p)
+	}
+	ui.Row(w, "next", next)
 }

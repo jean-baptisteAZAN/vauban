@@ -178,6 +178,42 @@ func TestApplyNonTTYWithoutYesExit2(t *testing.T) {
 	}
 }
 
+func TestApplyNoRemoteExit1(t *testing.T) {
+	root, fr := applyEnv(t)
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	writeFile(t, root, ".git/HEAD", "ref: refs/heads/main\n")
+	writeFile(t, root, ".git/refs/heads/main", "0123\n")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
+	wantExit(t, err, 1, noRemoteMsg, out)
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
+	}
+	if _, err := os.Stat(filepath.Join(root, config.FileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("vauban.yaml written without a remote")
+	}
+}
+
+// The TTY check still comes first, before the remote check and the config.
+func TestApplyNonTTYWithoutYesBeforeRemoteCheck(t *testing.T) {
+	root, _ := applyEnv(t)
+	writeFile(t, root, ".git/config", "[core]\n\tbare = false\n")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root)
+	wantExit(t, err, 2, errNeedTTY.Error(), out)
+}
+
+func TestApplySavesConfigBeforePlanFails(t *testing.T) {
+	root, _ := applyEnv(t)
+	t.Cleanup(cloud.Register(&doProvider{}))
+	saveState(t, root, staleState())
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "digitalocean")
+	if err == nil || !strings.Contains(err.Error(), "changing cloud") {
+		t.Fatalf("want cloud change error, got %v\n%s", err, out)
+	}
+	if c, err := config.Load(root); err != nil || c.Cloud != "digitalocean" {
+		t.Errorf("vauban.yaml not saved before the plan: %+v %v", c, err)
+	}
+}
+
 func TestApplyDestructiveNotConfirmedExit3(t *testing.T) {
 	root, fr := applyEnv(t)
 	fr.Responses[tofuShowCmd] = []byte(replaceJSON)

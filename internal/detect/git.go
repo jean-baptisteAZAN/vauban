@@ -27,8 +27,10 @@ func detectGit(p *Project) {
 	}
 	p.IsGitRepo = true
 	if !st.IsDir() { // worktree/submodule: .git is a file
+		p.HasCommits = true // a linked worktree always has a checked-out commit
 		return
 	}
+	p.HasCommits = headHasCommit(gitPath)
 	f, err := os.Open(filepath.Join(gitPath, "config"))
 	if err != nil {
 		return
@@ -50,4 +52,32 @@ func detectGit(p *Project) {
 			return
 		}
 	}
+}
+
+// headHasCommit reports whether .git/HEAD resolves to a commit: a detached
+// HEAD, or a branch ref present as a loose file or in packed-refs.
+func headHasCommit(gitDir string) bool {
+	b, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return false
+	}
+	head := strings.TrimSpace(string(b))
+	ref, ok := strings.CutPrefix(head, "ref: ")
+	if !ok {
+		return head != "" // detached HEAD: a commit id
+	}
+	ref = strings.TrimSpace(ref)
+	if _, err := os.Stat(filepath.Join(gitDir, filepath.FromSlash(ref))); err == nil {
+		return true
+	}
+	packed, err := os.ReadFile(filepath.Join(gitDir, "packed-refs"))
+	if err != nil {
+		return false
+	}
+	for line := range strings.Lines(string(packed)) {
+		if _, name, ok := strings.Cut(strings.TrimSpace(line), " "); ok && name == ref {
+			return true
+		}
+	}
+	return false
 }
