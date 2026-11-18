@@ -157,6 +157,8 @@ func isManaged(root string) bool {
 	return err == nil && len(lines) > 0 && lines[0] == Marker
 }
 
+var errNoFingerprint = errors.New(mainPath + " has no vauban fingerprint line; rerun with --force to regenerate it")
+
 // readFingerprint returns the fingerprint recorded in infra/main.tf.
 func readFingerprint(root string) (string, error) {
 	lines, err := headLines(root)
@@ -168,7 +170,7 @@ func readFingerprint(root string) (string, error) {
 			return fp, nil
 		}
 	}
-	return "", fmt.Errorf("%s has no %q line: rerun with --force to re-render it", mainPath, strings.TrimSpace(fingerprintPrefix))
+	return "", errNoFingerprint
 }
 
 func tofuCmd(tofu string, args ...string) engine.Cmd {
@@ -263,8 +265,8 @@ func truncate(s string) string {
 	return strings.ToValidUTF8(s[:maxPlan-len(suffix)], "") + suffix
 }
 
-// applyStep applies exactly the saved plan. A destructive plan needs
-// env.Confirm; without approval nothing runs and ErrNotConfirmed is returned.
+// applyStep applies exactly the saved plan. A destructive (or unknown) plan
+// needs env.Confirm; without approval nothing runs and ErrNotConfirmed is returned.
 // It records the fingerprint of the main.tf on disk as infra_fingerprint.
 type applyStep struct {
 	tofu string
@@ -280,7 +282,8 @@ func (a applyStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, 
 	if err != nil {
 		return nil, err
 	}
-	if env.In["plan_destructive"] == "true" {
+	// Fail closed: anything but an explicit "false" needs approval.
+	if env.In["plan_destructive"] != "false" {
 		if env.Confirm == nil {
 			return nil, engine.ErrNotConfirmed
 		}
@@ -369,10 +372,12 @@ func (m mainTF) Apply(_ context.Context, env *engine.Env) (engine.Outputs, error
 		return nil, err
 	}
 	if skip {
-		if fp, err := readFingerprint(env.Root); err == nil {
-			return engine.Outputs{"rendered_fingerprint": fp}, nil
+		// Fail (not Done) so a --force rerun regenerates the file.
+		fp, err := readFingerprint(env.Root)
+		if err != nil {
+			return nil, err
 		}
-		return nil, nil
+		return engine.Outputs{"rendered_fingerprint": fp}, nil
 	}
 	pub, err := deployPubkey(env, m.keyPath)
 	if err != nil {

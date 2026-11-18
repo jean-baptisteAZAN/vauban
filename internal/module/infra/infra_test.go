@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -203,6 +204,8 @@ func TestDeployKeyExistsIsNoop(t *testing.T) {
 }
 
 func TestFilesSkipIfExists(t *testing.T) {
+	// a kept main.tf must still carry its header for the fingerprint
+	const keep = "# managed by vauban\n# fingerprint: hetzner/nbg1/cx23\nkeep\n"
 	_, _, root := setup(t)
 	steps, err := New().Plan(project(t, root), cfg())
 	if err != nil {
@@ -212,7 +215,7 @@ func TestFilesSkipIfExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"main.tf", "cloud-init.yaml"} {
-		if err := os.WriteFile(filepath.Join(root, "infra", name), []byte("keep"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "infra", name), []byte(keep), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -225,7 +228,7 @@ func TestFilesSkipIfExists(t *testing.T) {
 	}
 	for _, name := range []string{"main.tf", "cloud-init.yaml"} {
 		b, _ := os.ReadFile(filepath.Join(root, "infra", name))
-		if string(b) != "keep" {
+		if string(b) != keep {
 			t.Errorf("%s overwritten without force", name)
 		}
 	}
@@ -240,7 +243,7 @@ func TestFilesSkipIfExists(t *testing.T) {
 	}
 	for _, name := range []string{"main.tf", "cloud-init.yaml"} {
 		b, _ := os.ReadFile(filepath.Join(root, "infra", name))
-		if string(b) == "keep" {
+		if string(b) == keep {
 			t.Errorf("%s not overwritten with force", name)
 		}
 	}
@@ -399,6 +402,12 @@ func newRunner(showJSON string) *keygenRunner {
 // apply mimics the CLI: load state, plan, clear stale steps, execute.
 func apply(t *testing.T, root string, c *config.Config, run engine.Runner, confirm func(string, string) (bool, error)) (*engine.State, error) {
 	t.Helper()
+	return applyWith(t, root, c, run, confirm, false)
+}
+
+// applyWith is apply with --force.
+func applyWith(t *testing.T, root string, c *config.Config, run engine.Runner, confirm func(string, string) (bool, error), force bool) (*engine.State, error) {
+	t.Helper()
 	st, err := engine.LoadState(root)
 	if err != nil {
 		t.Fatal(err)
@@ -410,7 +419,7 @@ func apply(t *testing.T, root string, c *config.Config, run engine.Runner, confi
 	for _, id := range StaleSteps(st, c) {
 		delete(st.Done, id)
 	}
-	return st, engine.Execute(context.Background(), steps, st, &engine.Env{Root: root, Run: run, Confirm: confirm})
+	return st, engine.Execute(context.Background(), steps, st, &engine.Env{Root: root, Run: run, Confirm: confirm, Force: force})
 }
 
 // tofuVerbs lists the tofu subcommands run, in order.
@@ -700,11 +709,64 @@ func TestApplyRejectsMainTFWithoutFingerprint(t *testing.T) {
 	writeKey(t, home, "vauban_shop_ed25519.pub", deployPub)
 	writeMainTF(t, root, "# managed by vauban\nterraform {}\n")
 	run := newRunner(safePlanJSON)
-	if _, err := apply(t, root, cfg(), run, nil); err == nil || !strings.Contains(err.Error(), "fingerprint") {
-		t.Fatalf("err = %v, want fingerprint error", err)
+	st, err := apply(t, root, cfg(), run, nil)
+	want := "infra:main-tf: infra/main.tf has no vauban fingerprint line; rerun with --force to regenerate it"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
 	}
-	if slices.Contains(tofuVerbs(run.Calls), "apply") {
-		t.Error("apply ran")
+	if st.Done["infra:main-tf"] {
+		t.Error("infra:main-tf marked done")
+	}
+	if len(tofuVerbs(run.Calls)) != 0 {
+		t.Errorf("tofu ran: %v", tofuVerbs(run.Calls))
+	}
+
+	// The advice works: a --force rerun regenerates main.tf and applies it.
+	run = newRunner(safePlanJSON)
+	st, err = applyWith(t, root, cfg(), run, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainTF, _ := os.ReadFile(filepath.Join(root, "infra", "main.tf"))
+	if !strings.HasPrefix(string(mainTF), "# managed by vauban\n# fingerprint: hetzner/nbg1/cx23\n") {
+		t.Errorf("main.tf not regenerated: %s", mainTF)
+	}
+	if st.Outputs["rendered_fingerprint"] != "hetzner/nbg1/cx23" || st.Outputs["infra_fingerprint"] != "hetzner/nbg1/cx23" {
+		t.Errorf("fingerprints = %q / %q", st.Outputs["rendered_fingerprint"], st.Outputs["infra_fingerprint"])
+	}
+	if got := tofuVerbs(run.Calls); !reflect.DeepEqual(got, []string{"init", "plan", "show", "apply", "output"}) {
+		t.Errorf("ran %v", got)
+	}
+}
+
+// The confirmation gate fails closed: only plan_destructive == "false" skips it.
+func TestApplyGateFailsClosed(t *testing.T) {
+	_, _, root := setup(t)
+	writeMainTF(t, root, "# managed by vauban\n# fingerprint: hetzner/nbg1/cx23\nterraform {}\n")
+	steps, err := New().Plan(project(t, root), cfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ap := steps[6]
+	if ap.ID() != "infra:apply" {
+		t.Fatalf("step 6 = %s", ap.ID())
+	}
+	for _, in := range []engine.Outputs{{}, {"plan_destructive": ""}, {"plan_destructive": "maybe"}, {"plan_destructive": "TRUE"}} {
+		run := &engine.FakeRunner{}
+		_, err := ap.Apply(context.Background(), &engine.Env{Root: root, Run: run, In: in})
+		if !errors.Is(err, engine.ErrNotConfirmed) {
+			t.Errorf("In %v: err = %v, want ErrNotConfirmed", in, err)
+		}
+		if len(run.Calls) != 0 {
+			t.Errorf("In %v: ran %v", in, run.Calls)
+		}
+	}
+	run := &engine.FakeRunner{}
+	if _, err := ap.Apply(context.Background(), &engine.Env{Root: root, Run: run, In: engine.Outputs{"plan_destructive": "false"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Calls) != 1 {
+		t.Fatalf("calls = %v", run.Calls)
 	}
 }
 
@@ -794,6 +856,14 @@ func TestPlanTextTruncated(t *testing.T) {
 	got := truncate(big)
 	if len(got) > 64*1024 || !strings.HasSuffix(got, "(truncated)\n") {
 		t.Fatalf("len = %d, suffix %q", len(got), got[len(got)-20:])
+	}
+	// a multibyte rune straddling the cut must not leave invalid UTF-8
+	for off := 0; off < 24; off++ {
+		s := strings.Repeat("x", 64*1024-off) + strings.Repeat("é", 4096)
+		got := truncate(s)
+		if !utf8.ValidString(got) || len(got) > 64*1024 || !strings.HasSuffix(got, "(truncated)\n") {
+			t.Fatalf("off %d: valid=%v len=%d", off, utf8.ValidString(got), len(got))
+		}
 	}
 	if truncate("short") != "short" {
 		t.Fatal("short text changed")
