@@ -733,7 +733,9 @@ func TestPlanQuotaNotCheckedNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "note: hetzner quota not checked (API has no limits)\n") || strings.Contains(out, "before apply:") {
+	// Other preflight warnings (e.g. tofu missing on the CI runner) may appear;
+	// only a quota *warning* would be wrong here.
+	if !strings.Contains(out, "note: hetzner quota not checked (API has no limits)\n") || strings.Contains(out, "quota not checked:") {
 		t.Errorf("want a note and no warning in:\n%s", out)
 	}
 }

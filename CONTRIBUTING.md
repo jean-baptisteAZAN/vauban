@@ -30,6 +30,11 @@ go test -race ./...
 golangci-lint run
 ```
 
+CI does not run on draft pull requests. Open your PR as a draft while you
+iterate, then mark it **Ready for review**: CI runs then, and on every later
+push (a newer push cancels the older run). `main` only accepts PRs whose
+checks are green.
+
 ### Golden files
 
 Generated files (Dockerfiles, workflows, Caddyfile, compose, OpenTofu, cloud-init) are compared against golden files under `testdata/golden/`. When you change a template on purpose, regenerate them and review the diff:
