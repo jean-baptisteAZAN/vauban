@@ -1,0 +1,53 @@
+{{define "build"}}
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+{{- end}}
+{{define "nodesetup"}}
+      - uses: actions/checkout@v7
+{{- if eq .PM "pnpm"}}
+      - uses: pnpm/action-setup@v6
+{{- if not .PMPinned}}
+        with:
+          version: latest
+{{- end}}
+{{- end}}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "{{.Node}}"
+{{- if .Cache}}
+          cache: {{.Cache}}
+{{- end}}
+{{- if eq .PM "bun"}}
+      - uses: oven-sh/setup-bun@v2
+{{- end}}
+      - run: {{.Install}}
+{{- end}}
+{{define "pysetup"}}
+      - uses: actions/checkout@v7
+{{- if .UV}}
+      - uses: astral-sh/setup-uv@v10
+      - run: uv sync --frozen
+{{- else}}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "{{.Python}}"
+{{- if .Poetry}}
+      - run: pipx install poetry
+      - run: poetry install --no-root
+{{- else}}
+{{- if .Reqs}}
+      - run: pip install -r requirements.txt
+{{- end}}
+{{- if .Pkg}}
+      - run: pip install .
+{{- end}}
+{{- end}}
+{{- end}}
+{{- end}}

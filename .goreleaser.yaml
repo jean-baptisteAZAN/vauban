@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: vauban
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: vauban
+    main: .
+    binary: vauban
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: vauban
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# brews is deprecated since goreleaser v2.10; casks are the supported way to
+# publish prebuilt binaries to a Homebrew tap (macOS; Linux uses the tarballs).
+homebrew_casks:
+  - name: vauban
+    repository:
+      owner: jean-baptisteAZAN
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/jean-baptisteAZAN/vauban
+    description: Detect your repo and set up CI, containers, OpenTofu infra and deploy
+    license: MIT
+    # Leave uploads off for pre-release tags (and until the tap repo exists, run
+    # with --skip=homebrew if the token is missing).
+    skip_upload: auto
+    # The binary is not signed or notarized: clear the quarantine bit on install.
+    hooks:
+      post:
+        install_steps: |
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/vauban"]

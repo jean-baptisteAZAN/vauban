@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+{{- if .Lint}}
+  lint:
+    runs-on: ubuntu-latest
+    steps:{{template "nodesetup" .}}
+      - run: {{.PM}} run lint
+{{- end}}
+{{- if .Test}}
+
+  test:
+    runs-on: ubuntu-latest
+    steps:{{template "nodesetup" .}}
+      - run: {{.PM}} run test
+{{- end}}
+{{template "build"}}

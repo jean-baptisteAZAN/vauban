@@ -1,0 +1,6 @@
+{
+  "name": "node-app",
+  "version": "1.0.0",
+  "engines": { "node": ">=20" },
+  "scripts": { "lint": "eslint .", "test": "node --test", "start": "node index.js" }
+}
