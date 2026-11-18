@@ -26,9 +26,10 @@ var (
 	// forceExitDelay is how long vauban waits, after a forced stop, for the
 	// command to return before it exits 130 itself.
 	forceExitDelay = 5 * time.Second
-	// notifySignals subscribes c to SIGINT and SIGTERM. Tests replace it.
+	// notifySignals subscribes c to SIGINT, SIGTERM and SIGHUP (terminal
+	// closed). Tests replace it.
 	notifySignals = func(c chan<- os.Signal) (stop func()) {
-		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		return func() { signal.Stop(c) }
 	}
 )
@@ -40,7 +41,7 @@ type interruptOpts struct {
 	exit           func(code int)
 }
 
-// interrupter turns SIGINT/SIGTERM into a graceful, then forced, stop.
+// interrupter turns SIGINT/SIGTERM/SIGHUP into a graceful, then forced, stop.
 // Children run in their own process group (engine.ExecRunner), so a
 // terminal Ctrl-C reaches only vauban:
 //   - the first signal cancels ctx; ExecRunner forwards one SIGINT to the
@@ -52,6 +53,26 @@ type interrupter struct {
 	kill   chan struct{}
 	forced atomic.Bool
 	stop   func()
+
+	mu    sync.Mutex
+	hooks []func()
+}
+
+// beforeExit registers f to run (best effort) just before the backstop exit,
+// e.g. to stop a spinner and restore the terminal.
+func (in *interrupter) beforeExit(f func()) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.hooks = append(in.hooks, f)
+}
+
+func (in *interrupter) runHooks() {
+	in.mu.Lock()
+	hooks := append([]func(){}, in.hooks...)
+	in.mu.Unlock()
+	for _, f := range hooks {
+		f()
+	}
 }
 
 // watchSignals sets up an interrupter on the process signals. Call stop when
@@ -102,6 +123,10 @@ func newInterrupter(parent context.Context, w io.Writer, sigs <-chan os.Signal, 
 		defer t.Stop()
 		select {
 		case <-t.C:
+			in.runHooks()
+			if o.tty {
+				fmt.Fprint(w, "\x1b[?25h") // show the cursor
+			}
 			o.exit(130)
 		case <-done:
 		}

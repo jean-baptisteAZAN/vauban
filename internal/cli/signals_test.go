@@ -40,8 +40,8 @@ func TestInterrupterGracefulThenForced(t *testing.T) {
 
 	sigs <- syscall.SIGTERM
 	waitClosed(t, in.kill, "kill")
-	if !in.forced.Load() || !strings.HasSuffix(buf.String(), msgForced+"\n") {
-		t.Fatalf("after second signal: forced=%v %q", in.forced.Load(), buf.String())
+	if !in.forced.Load() {
+		t.Fatal("second signal did not force")
 	}
 	// Nothing returned in time: the backstop exits 130.
 	select {
@@ -51,6 +51,10 @@ func TestInterrupterGracefulThenForced(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no backstop exit")
+	}
+	// Read only now: the goroutine writes up to the exit call.
+	if want := msgStopping + "\n" + msgForced + "\n\x1b[?25h"; buf.String() != want {
+		t.Fatalf("output %q, want %q", buf.String(), want)
 	}
 	in.stop()
 }
@@ -100,17 +104,7 @@ func TestInterrupterRunnerGetsKill(t *testing.T) {
 // resume message, and the stopping notice on stderr.
 func TestApplySignalGraceful(t *testing.T) {
 	root, fr := applyEnv(t)
-	sigs := make(chan os.Signal, 2)
-	old := notifySignals
-	notifySignals = func(c chan<- os.Signal) func() {
-		go func() {
-			for s := range sigs {
-				c <- s
-			}
-		}()
-		return func() {}
-	}
-	t.Cleanup(func() { notifySignals = old })
+	sigs := injectSignals(t)
 	setRunner(t, signalRunner{FakeRunner: fr, on: "tofu -chdir=infra init -input=false", sigs: sigs})
 
 	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes", "--cloud", "hetzner")
@@ -140,4 +134,63 @@ func (s signalRunner) Run(ctx context.Context, cmd engine.Cmd) ([]byte, error) {
 		return nil, ctx.Err()
 	}
 	return out, err
+}
+
+// injectSignals makes watchSignals read signals from the returned channel.
+// The forwarding goroutine ends when the command stops watching.
+func injectSignals(t *testing.T) chan<- os.Signal {
+	t.Helper()
+	sigs := make(chan os.Signal, 2)
+	old := notifySignals
+	notifySignals = func(c chan<- os.Signal) func() {
+		done := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case s := <-sigs:
+					c <- s
+				case <-done:
+					return
+				}
+			}
+		}()
+		return func() { close(done) }
+	}
+	t.Cleanup(func() { notifySignals = old })
+	return sigs
+}
+
+// SIGHUP (terminal closed) stops gracefully, like a first Ctrl-C.
+func TestWatchSignalsHandlesSIGHUP(t *testing.T) {
+	var buf bytes.Buffer
+	ctx, in := watchSignals(context.Background(), &buf, true)
+	defer in.stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	waitClosed(t, ctx.Done(), "ctx")
+	if in.forced.Load() {
+		t.Fatal("SIGHUP forced a stop")
+	}
+}
+
+// Before the backstop exit, the registered hooks restore the terminal.
+func TestInterrupterRestoresBeforeBackstopExit(t *testing.T) {
+	var buf bytes.Buffer
+	sigs := make(chan os.Signal, 2)
+	var order []string
+	exited := make(chan struct{})
+	_, in := newInterrupter(context.Background(), &buf, sigs, interruptOpts{tty: true, forceExitDelay: 10 * time.Millisecond,
+		exit: func(int) { order = append(order, "exit"); close(exited) }})
+	defer in.stop()
+	in.beforeExit(func() { order = append(order, "restore") })
+	sigs <- os.Interrupt
+	sigs <- os.Interrupt
+	waitClosed(t, exited, "exit")
+	if strings.Join(order, ",") != "restore,exit" {
+		t.Fatalf("order = %v", order)
+	}
+	if !strings.Contains(buf.String(), "\x1b[?25h") {
+		t.Errorf("cursor not shown: %q", buf.String())
+	}
 }

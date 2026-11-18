@@ -120,6 +120,7 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	}
 
 	prog := ui.NewProgress(w)
+	sig.beforeExit(prog.Abort)
 	defer prog.Pause()
 	// interrupted maps a failure caused by a signal to exit 130.
 	interrupted := func(err error) error {
@@ -163,6 +164,9 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	prog.Pause()
+	if ctx.Err() != nil { // a delete was cut short: keep state so a rerun finishes
+		return interrupted(ctx.Err())
+	}
 
 	if err := os.Remove(filepath.Join(root, ".vauban", "state.json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -184,7 +188,8 @@ func secretNotFound(err error) bool {
 }
 
 // destroyPreflight checks, before confirmation, what destroy needs: gh on
-// PATH and authenticated (when there are secrets to delete), and for managed
+// PATH, authenticated and able to access the repo (when there are secrets to
+// delete), and for managed
 // infra tofu and the cloud credentials, which it returns.
 func destroyPreflight(ctx context.Context, root string, c *config.Config, repo string, managed bool) (creds, problems []string) {
 	if repo != "" {
@@ -193,6 +198,10 @@ func destroyPreflight(ctx context.Context, root string, c *config.Config, repo s
 		} else if _, err := engine.PreflightRunner.Run(ctx, engine.Cmd{Dir: root, Name: "gh", Args: []string{"auth", "status"}}); err != nil {
 			// The command's output is discarded: it may describe the token.
 			problems = append(problems, "gh is not authenticated (run gh auth login)")
+		} else if _, err := engine.PreflightRunner.Run(ctx, engine.Cmd{Dir: root, Name: "gh", Args: []string{"api", "repos/" + repo, "--silent"}}); err != nil {
+			// GitHub answers 404 for a repo the token cannot see, as for a
+			// missing secret: only with access is a later 404 "not set".
+			problems = append(problems, "cannot access GitHub repo "+repo+" with the current gh login")
 		}
 	}
 	if managed {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +24,7 @@ type Progress struct {
 	prog   *tea.Program
 	done   chan struct{}
 	exists bool // the running step reported "skip (exists)"
+	live   atomic.Pointer[tea.Program]
 }
 
 // NewProgress writes to w, styled when Styled() reports so.
@@ -99,6 +101,15 @@ func (l progressLog) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// Abort stops the running spinner program, if any, restoring the terminal.
+// Unlike the other methods it is safe to call from another goroutine (for
+// example just before a forced exit).
+func (p *Progress) Abort() {
+	if prog := p.live.Load(); prog != nil {
+		prog.Kill()
+	}
+}
+
 // Pause removes the running spinner line, if any, so the caller can print or
 // prompt. The step's final line is printed when it finishes.
 func (p *Progress) Pause() {
@@ -113,6 +124,7 @@ func (p *Progress) start(describe string) {
 	}
 	m := stepModel{spin: spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(Warn)), text: describe}
 	p.prog = tea.NewProgram(m, tea.WithOutput(p.w), tea.WithInput(nil), tea.WithoutSignalHandler())
+	p.live.Store(p.prog)
 	p.done = make(chan struct{})
 	go func(prog *tea.Program, done chan struct{}) {
 		_, _ = prog.Run()
@@ -124,6 +136,7 @@ func (p *Progress) start(describe string) {
 // program to exit.
 func (p *Progress) stop(final string) {
 	p.prog.Send(finishMsg(final))
+	p.live.Store(nil)
 	<-p.done
 	p.prog = nil
 }

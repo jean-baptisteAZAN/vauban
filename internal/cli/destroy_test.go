@@ -192,14 +192,52 @@ func TestDestroyPreflightGhNotAuthenticated(t *testing.T) {
 	}
 }
 
-func TestDestroyRepoNotFoundIsReported(t *testing.T) {
+func TestDestroyRepoAccessFailureExit1(t *testing.T) {
 	root, fr := destroyEnv(t)
-	fr.Errors = map[string]error{
-		"gh secret delete DEPLOY_SSH_KEY --repo acme/shop": errors.New("gh: exit status 1: GraphQL: Could not resolve to a Repository (repository not found)"),
-	}
+	pre := &engine.FakeRunner{Errors: map[string]error{
+		"gh api repos/acme/shop --silent": errors.New("gh: exit status 1: HTTP 404: Not Found"),
+	}}
+	old := engine.PreflightRunner
+	engine.PreflightRunner = pre
+	t.Cleanup(func() { engine.PreflightRunner = old })
 	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
 	wantExit(t, err, 1, "", out)
-	if !strings.Contains(err.Error(), "DEPLOY_SSH_KEY") {
-		t.Errorf("error = %q", err)
+	if !strings.Contains(out, "cannot access GitHub repo acme/shop with the current gh login") {
+		t.Errorf("missing repo access problem in:\n%s", out)
+	}
+	if len(fr.Calls) != 0 || !exists(statePath(root)) {
+		t.Errorf("destroy acted despite failed repo access: %q", callLines(fr))
+	}
+	if strings.Contains(out, "destroy will:") {
+		t.Errorf("preflight must fail before the confirmation step:\n%s", out)
+	}
+}
+
+func TestDestroySecretNotSetIsSuccess(t *testing.T) {
+	root, fr := destroyEnv(t)
+	fr.Errors = map[string]error{
+		"gh secret delete DEPLOY_SSH_KEY --repo acme/shop": errors.New("gh: exit status 1: HTTP 404: Not Found (https://api.github.com/repos/acme/shop/actions/secrets/DEPLOY_SSH_KEY)"),
+	}
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	if err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[skip] gh secret delete DEPLOY_SSH_KEY --repo acme/shop (not set)") {
+		t.Errorf("missing (not set) line in:\n%s", out)
+	}
+	if exists(statePath(root)) {
+		t.Error("state.json not removed")
+	}
+}
+
+// A signal while deleting secrets keeps state and exits 130.
+func TestDestroyInterruptedDuringSecrets(t *testing.T) {
+	root, fr := destroyEnv(t)
+	sigs := injectSignals(t)
+	setRunner(t, signalRunner{FakeRunner: fr, on: "gh secret delete DEPLOY_DOMAIN --repo acme/shop", sigs: sigs})
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	wantExit(t, err, 130, "interrupted — state kept; rerun `vauban destroy` to finish", out)
+	if !exists(statePath(root)) {
+		t.Error("state.json removed after interrupt")
 	}
 }

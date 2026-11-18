@@ -92,6 +92,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	}
 
 	prog := ui.NewProgress(w)
+	sig.beforeExit(prog.Abort)
 	env := &engine.Env{
 		Root:     root,
 		Force:    force,
