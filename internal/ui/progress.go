@@ -5,34 +5,58 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync/atomic"
+	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
-	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 )
 
 // Progress reports apply's steps, one line each. Styled: a spinner while the
-// step runs, replaced by ✓ (done), · (skipped) or ✗ (failed). Plain:
-// "[run] …", "[ok] …", "[skip] …", "[fail] …: <err>".
+// step runs, replaced by ✓ (done), · (skipped) or ✗ (failed), each line cut
+// to the terminal width with "…". Plain: "[run] …", "[ok] …", "[skip] …",
+// "[fail] …: <err>".
+//
+// The spinner is drawn directly (carriage return, erase line) rather than by
+// a bubbletea program: a program started per step queries the terminal
+// (DECRQM for modes 2026/2027) without reading stdin, so the terminal's reply
+// was echoed onto the screen and, after exit, onto the shell prompt.
 type Progress struct {
 	w      io.Writer
 	styled bool
-	spin   bool // the terminal has a size; a 0x0 pty renders nothing
-	prog   *tea.Program
-	done   chan struct{}
+	// width reports the terminal's columns; nil, or 0 when unknown (no
+	// spinner, no truncation). A 0x0 pty renders no spinner.
+	width  func() int
 	exists bool // the running step reported "skip (exists)"
-	live   atomic.Pointer[tea.Program]
+
+	mu  sync.Mutex // guards cur and spinner drawing (Abort may run concurrently)
+	cur *spinLine
 }
+
+// spinLine is the running step's spinner line.
+type spinLine struct {
+	text  string
+	frame int
+	stop  chan struct{}
+	done  chan struct{}
+}
+
+var spinStyle = spinner.MiniDot
 
 // NewProgress writes to w, styled when Styled() reports so.
 func NewProgress(w io.Writer) *Progress {
 	p := &Progress{w: w, styled: Styled()}
 	if p.styled {
-		width, _, err := term.GetSize(os.Stdout.Fd())
-		p.spin = err == nil && width > 0
+		p.width = func() int {
+			cols, _, err := term.GetSize(os.Stdout.Fd())
+			if err != nil {
+				return 0
+			}
+			return cols
+		}
 	}
 	return p
 }
@@ -73,11 +97,7 @@ func (p *Progress) Update(_, describe string, phase engine.Phase, err error) {
 	case engine.PhaseFail:
 		line = Err.Render("✗") + " " + describe + Muted.Render(": "+fmt.Sprint(err))
 	}
-	if p.prog == nil {
-		fmt.Fprintln(p.w, line)
-		return
-	}
-	p.stop(line)
+	p.finish(line)
 }
 
 // Log returns a writer for engine.Env.Log. A "skip (exists) <path>" note
@@ -101,81 +121,92 @@ func (l progressLog) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// Abort stops the running spinner program, if any, restoring the terminal.
+// Abort removes the running spinner line, if any, and shows the cursor again.
 // Unlike the other methods it is safe to call from another goroutine (for
 // example just before a forced exit).
-func (p *Progress) Abort() {
-	if prog := p.live.Load(); prog != nil {
-		prog.Kill()
-	}
-}
+func (p *Progress) Abort() { p.finish("") }
 
 // Pause removes the running spinner line, if any, so the caller can print or
 // prompt. The step's final line is printed when it finishes.
-func (p *Progress) Pause() {
-	if p.prog != nil {
-		p.stop("")
+func (p *Progress) Pause() { p.finish("") }
+
+// cols is the terminal width, 0 when unknown.
+func (p *Progress) cols() int {
+	if p.width == nil {
+		return 0
 	}
+	return p.width()
 }
 
 func (p *Progress) start(describe string) {
-	if !p.spin {
+	if p.cols() <= 0 {
 		return
 	}
-	m := stepModel{spin: spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(Warn)), text: describe}
-	p.prog = tea.NewProgram(m, tea.WithOutput(p.w), tea.WithInput(nil), tea.WithoutSignalHandler())
-	p.live.Store(p.prog)
-	p.done = make(chan struct{})
-	go func(prog *tea.Program, done chan struct{}) {
-		_, _ = prog.Run()
-		close(done)
-	}(p.prog, p.done)
+	l := &spinLine{text: describe, stop: make(chan struct{}), done: make(chan struct{})}
+	p.mu.Lock()
+	p.cur = l
+	fmt.Fprint(p.w, ansi.HideCursor)
+	p.draw(l)
+	p.mu.Unlock()
+	go p.spin(l)
 }
 
-// stop replaces the spinner line with final (or nothing) and waits for the
-// program to exit.
-func (p *Progress) stop(final string) {
-	p.prog.Send(finishMsg(final))
-	p.live.Store(nil)
-	<-p.done
-	p.prog = nil
-}
-
-type finishMsg string
-
-// stepModel is one spinner line for the running step.
-type stepModel struct {
-	spin  spinner.Model
-	text  string
-	final *string
-}
-
-func (m stepModel) Init() tea.Cmd { return m.spin.Tick }
-
-func (m stepModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case finishMsg:
-		s := string(msg)
-		m.final = &s
-		return m, tea.Quit
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spin, cmd = m.spin.Update(msg)
-		return m, cmd
-	}
-	return m, nil
-}
-
-func (m stepModel) View() tea.View {
-	if m.final != nil {
-		if *m.final == "" {
-			return tea.NewView("")
+// spin redraws l at the spinner's pace until l.stop is closed.
+func (p *Progress) spin(l *spinLine) {
+	defer close(l.done)
+	tick := time.NewTicker(spinStyle.FPS)
+	defer tick.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-tick.C:
+			p.mu.Lock()
+			if p.cur == l {
+				l.frame = (l.frame + 1) % len(spinStyle.Frames)
+				p.draw(l)
+			}
+			p.mu.Unlock()
 		}
-		// On exit the renderer erases from its last line down: end with a
-		// newline so the final line stays.
-		return tea.NewView(*m.final + "\n")
 	}
-	return tea.NewView(m.spin.View() + " " + m.text)
+}
+
+// draw rewrites the current line with l's frame and text. p.mu is held.
+func (p *Progress) draw(l *spinLine) {
+	line := Warn.Render(spinStyle.Frames[l.frame]) + " " + l.text
+	fmt.Fprint(p.w, "\r"+ansi.EraseEntireLine+fitLine(line, p.cols()))
+}
+
+// finish replaces the spinner line, if any, with final (nothing when final is
+// ""), stops the spinner and shows the cursor again.
+func (p *Progress) finish(final string) {
+	p.mu.Lock()
+	l := p.cur
+	p.cur = nil
+	if l != nil {
+		fmt.Fprint(p.w, "\r"+ansi.EraseEntireLine)
+	}
+	if final != "" {
+		fmt.Fprintln(p.w, fitLine(final, p.cols()))
+	}
+	if l != nil {
+		fmt.Fprint(p.w, ansi.ShowCursor)
+	}
+	p.mu.Unlock()
+	if l != nil {
+		close(l.stop)
+		<-l.done
+	}
+}
+
+// fitLine cuts s (which may hold ANSI styles) to width-1 columns, ending it
+// with "…" when cut. Leaving the last column free avoids terminals that wrap
+// as soon as it is written. width <= 0 means unknown: s is returned as is.
+func fitLine(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	return ansi.Truncate(s, width-1, "…")
 }
 
 // Footer is what apply reports once every step succeeded.

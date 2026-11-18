@@ -31,12 +31,12 @@ plan)
   sleep 1.2
   : >tfplan
   echo "OpenTofu will perform the following actions:"
-  echo "  + digitalocean_firewall.vauban"
-  echo "  + digitalocean_droplet.vauban"
-  echo "  + digitalocean_ssh_key.vauban[0]"
+  echo "  + hcloud_firewall.vauban"
+  echo "  + hcloud_server.vauban"
+  echo "  + hcloud_ssh_key.vauban[0]"
   echo "Plan: 3 to add, 0 to change, 0 to destroy." ;;
 show)
-  printf '%s\n' '{"format_version":"1.2","resource_changes":[{"address":"digitalocean_firewall.vauban","change":{"actions":["create"]}},{"address":"digitalocean_droplet.vauban","change":{"actions":["create"]}},{"address":"digitalocean_ssh_key.vauban[0]","change":{"actions":["create"]}}]}' ;;
+  printf '%s\n' '{"format_version":"1.2","resource_changes":[{"address":"hcloud_firewall.vauban","change":{"actions":["create"]}},{"address":"hcloud_server.vauban","change":{"actions":["create"]}},{"address":"hcloud_ssh_key.vauban[0]","change":{"actions":["create"]}}]}' ;;
 apply)
   sleep 2.5
   echo "Apply complete! Resources: 3 added, 0 changed, 0 destroyed." ;;
@@ -91,16 +91,11 @@ cat >"$DEMO/hello-api/.git/config" <<'EOF'
 	fetch = +refs/heads/*:refs/remotes/origin/*
 EOF
 
-unset GH_TOKEN GITHUB_TOKEN HCLOUD_TOKEN SCW_ACCESS_KEY SCW_SECRET_KEY \
+unset GH_TOKEN GITHUB_TOKEN DIGITALOCEAN_TOKEN SCW_ACCESS_KEY SCW_SECRET_KEY \
   SCW_DEFAULT_PROJECT_ID SCW_CONFIG_PATH SCW_PROFILE XDG_CONFIG_HOME NO_COLOR
 export HOME="$DEMO/home"
 export PATH="$DEMO/bin:/usr/bin:/bin"
-export DIGITALOCEAN_TOKEN=demo-token
-# Workaround for a known vauban issue: bubbletea v2 asks the terminal about
-# modes 2026/2027 (DECRQM) when each apply spinner starts; a step that ends
-# before the reply arrives leaves "^[[?2026;0$y" echoed on screen. bubbletea
-# skips the query when SSH_TTY and a TERM_PROGRAM are set.
-export TERM_PROGRAM=vhs SSH_TTY=/dev/null
+export HCLOUD_TOKEN=demo-token
 export PS1='\[\e[38;5;141m\]❯\[\e[0m\] '
 cd "$DEMO/hello-api"
 set +e

@@ -91,9 +91,13 @@ func runApply(cmd *cobra.Command, _ []string) error {
 
 	if !yes {
 		ok := false
-		if err := huh.NewForm(huh.NewGroup(
-			huh.NewConfirm().Title("Apply this plan?").Value(&ok),
-		)).RunWithContext(ctx); err != nil {
+		answer := func() string {
+			if ok {
+				return ui.Answer("Apply this plan?", "Yes")
+			}
+			return ui.Answer("Apply this plan?", "No")
+		}
+		if err := ui.RunForm(ctx, answer, huh.NewConfirm().Title("Apply this plan?").Value(&ok)); err != nil {
 			return err
 		}
 		if !ok {
@@ -178,10 +182,10 @@ func confirmDestructive(ctx context.Context, w io.Writer, prog *ui.Progress, pro
 // typedProject asks for the project name and reports whether it matches.
 func typedProject(ctx context.Context, project, purpose string) (bool, error) {
 	var typed string
-	err := huh.NewForm(huh.NewGroup(
-		huh.NewInput().Title("Type the project name " + purpose).
-			Description("project: " + project).Value(&typed),
-	)).RunWithContext(ctx)
+	title := "Type the project name " + purpose
+	err := ui.RunForm(ctx, func() string { return ui.Answer(title, typed) },
+		huh.NewInput().Title(title).Description("project: "+project).Value(&typed),
+	)
 	if err != nil {
 		return false, err
 	}

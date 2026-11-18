@@ -508,9 +508,15 @@ func findDomainStep(t *testing.T, steps []engine.Step) engine.Step {
 func TestDomainStep(t *testing.T) {
 	ctx := context.Background()
 	s := findDomainStep(t, plan(t, goApp(t), cfg()))
+	if d := s.Describe(); d != "deploy domain: sslip.io domain" {
+		t.Errorf("describe before apply = %q", d)
+	}
 	out, err := s.Apply(ctx, &engine.Env{In: engine.Outputs{"server_ip": "1.2.3.4"}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if d := s.Describe(); d != "deploy domain: 1-2-3-4.sslip.io" {
+		t.Errorf("describe after apply = %q, want the resolved domain", d)
 	}
 	if out["domain"] != "1-2-3-4.sslip.io" || out["deployed_ip"] != "1.2.3.4" || out["deployed_domain"] != "1-2-3-4.sslip.io" {
 		t.Errorf("out = %v", out)

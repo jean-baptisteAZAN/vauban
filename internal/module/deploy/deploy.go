@@ -92,7 +92,7 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 		steps = append(steps, engine.WriteFile{Path: f.path, Content: b, Mode: 0o644})
 	}
 	return append(steps,
-		domainStep{domain: c.Domain},
+		&domainStep{domain: c.Domain},
 		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_HOST", FromOutput: "server_ip"},
 		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_SSH_KEY", FromFile: "$deploy_key_path"},
 		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_DOMAIN", FromOutput: "domain"},
@@ -192,21 +192,26 @@ func desiredDomain(configured, ip string) string {
 // domainStep resolves the public domain at Apply time, once the server IP is
 // known: vauban.yaml's domain, else <ip>.sslip.io. It outputs domain, and
 // deployed_ip and deployed_domain (what the deploy secrets were set for).
-type domainStep struct{ domain string }
+// Once applied, Describe names the resolved domain.
+type domainStep struct{ domain, resolved string }
 
-func (domainStep) ID() string { return domainStepID }
-func (d domainStep) Describe() string {
-	if d.domain != "" {
+func (*domainStep) ID() string { return domainStepID }
+func (d *domainStep) Describe() string {
+	switch {
+	case d.domain != "":
 		return "deploy domain: " + d.domain
+	case d.resolved != "":
+		return "deploy domain: " + d.resolved
 	}
-	return "deploy domain: <server_ip>.sslip.io"
+	return "deploy domain: sslip.io domain"
 }
 
-func (d domainStep) Apply(_ context.Context, env *engine.Env) (engine.Outputs, error) {
+func (d *domainStep) Apply(_ context.Context, env *engine.Env) (engine.Outputs, error) {
 	ip := env.In["server_ip"]
 	if ip == "" {
 		return nil, errors.New("deploy domain: no server_ip output (run infra first)")
 	}
 	domain := desiredDomain(d.domain, ip)
+	d.resolved = domain
 	return engine.Outputs{"domain": domain, "deployed_ip": ip, "deployed_domain": domain}, nil
 }
