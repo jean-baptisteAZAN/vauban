@@ -40,7 +40,9 @@ Type "vauban plan"
 Sleep 300ms
 Enter
 Sleep 1.5s
-# Cloud: DigitalOcean
+# Cloud: Hetzner
+Down
+Sleep 500ms
 Enter
 # Region (fetched behind a spinner; default preselected)
 Sleep 2s
