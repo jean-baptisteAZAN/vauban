@@ -1,0 +1,192 @@
+// Package deploy wires the server to GitHub: a Caddy + app compose file, the
+// deploy workflow (build, push to GHCR, deploy over SSH) and the GitHub
+// secrets it reads. Secret values are only ever passed to gh on stdin.
+package deploy
+
+import (
+	"bytes"
+	"context"
+	"embed"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"text/template"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/jean-baptisteAZAN/vauban/internal/config"
+	"github.com/jean-baptisteAZAN/vauban/internal/detect"
+	"github.com/jean-baptisteAZAN/vauban/internal/engine"
+	"github.com/jean-baptisteAZAN/vauban/internal/module/ci"
+)
+
+//go:embed templates/*
+var templates embed.FS
+
+const (
+	composePath  = "deploy/compose.yaml"
+	caddyPath    = "deploy/Caddyfile"
+	workflowPath = ".github/workflows/deploy.yml"
+	domainStepID = "deploy:domain"
+)
+
+// ErrNoRemote is returned when the repo has no GitHub origin.
+var ErrNoRemote = errors.New("deploy needs a GitHub remote (git remote add origin …)")
+
+// Module implements engine.Module for the deployment wiring.
+type Module struct{}
+
+// New returns the deploy module.
+func New() *Module { return &Module{} }
+
+func (*Module) ID() string         { return "deploy" }
+func (*Module) Title() string      { return "deploy" }
+func (*Module) Requires() []string { return []string{"container", "ci", "infra"} }
+
+func (*Module) Detect(p *detect.Project) engine.Status {
+	if slices.Contains(p.Workflows, "deploy.yml") || slices.Contains(p.Workflows, "deploy.yaml") {
+		return engine.StatusPresent
+	}
+	return engine.StatusMissing
+}
+
+type data struct {
+	Image      string // ghcr.io/<owner>/<repo>, lowercased (GHCR requires it)
+	AppPort    string
+	CIWorkflow string // YAML-quoted workflow name; "" → trigger on push
+	SHA        string // expression for the built commit
+}
+
+func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) {
+	if p.GitHubRepo == "" {
+		return nil, ErrNoRemote
+	}
+	d := data{
+		Image:   "ghcr.io/" + strings.ToLower(p.GitHubRepo),
+		AppPort: strconv.Itoa(c.AppPort),
+		SHA:     "${{ github.sha }}",
+	}
+	if name, ok := ciWorkflow(p, c); ok {
+		q, err := json.Marshal(name) // a JSON string is a valid YAML scalar
+		if err != nil {
+			return nil, err
+		}
+		d.CIWorkflow = string(q)
+		// github.sha is the default branch head, not the commit CI tested.
+		d.SHA = "${{ github.event.workflow_run.head_sha }}"
+	}
+	var steps []engine.Step
+	for _, f := range []struct{ path, tpl string }{
+		{composePath, "compose.yaml"},
+		{caddyPath, "Caddyfile"},
+		{workflowPath, "deploy.yml"},
+	} {
+		b, err := render(f.tpl, d)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, engine.WriteFile{Path: f.path, Content: b, Mode: 0o644})
+	}
+	return append(steps,
+		domainStep{domain: c.Domain},
+		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_HOST", FromOutput: "server_ip"},
+		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_SSH_KEY", FromFile: "$deploy_key_path"},
+		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_DOMAIN", FromOutput: "domain"},
+	), nil
+}
+
+func render(name string, d data) ([]byte, error) {
+	tpl, err := template.New(name).Delims("<%", "%>").ParseFS(templates, "templates/"+name)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := tpl.Execute(&buf, d); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// ciWorkflow returns the name of the workflow deploy should follow: an
+// existing CI workflow's name (GitHub falls back to its path), else "ci" when
+// the ci module generates it. ok is false when there is no CI to follow.
+func ciWorkflow(p *detect.Project, c *config.Config) (name string, ok bool) {
+	var file string
+	for _, w := range p.Workflows {
+		if w == "ci.yml" || w == "ci.yaml" {
+			file = w
+			break
+		}
+		if file == "" && strings.Contains(w, "ci") {
+			file = w
+		}
+	}
+	if file != "" {
+		path := ".github/workflows/" + file
+		var wf struct {
+			Name string `yaml:"name"`
+		}
+		if b, err := os.ReadFile(filepath.Join(p.Root, filepath.FromSlash(path))); err == nil {
+			_ = yaml.Unmarshal(b, &wf)
+		}
+		if wf.Name != "" {
+			return wf.Name, true
+		}
+		return path, true
+	}
+	steps, err := ci.New().Plan(p, c)
+	if err != nil {
+		return "", false
+	}
+	for _, s := range steps {
+		if w, isFile := s.(engine.WriteFile); isFile && w.Path == ci.WorkflowPath {
+			return "ci", true
+		}
+	}
+	return "", false
+}
+
+// SSLipDomain returns the sslip.io name that resolves to ip.
+func SSLipDomain(ip string) string {
+	return strings.NewReplacer(".", "-", ":", "-").Replace(ip) + ".sslip.io"
+}
+
+// StaleSteps returns the step IDs the caller must clear from st.Done before
+// Execute when the server was replaced (its IP differs from the one the
+// secrets were set for), or nil.
+func StaleSteps(st *engine.State) []string {
+	deployed, current := st.Outputs["deployed_ip"], st.Outputs["server_ip"]
+	if deployed == "" || current == "" || deployed == current {
+		return nil
+	}
+	return []string{domainStepID, "secret:DEPLOY_HOST", "secret:DEPLOY_DOMAIN"}
+}
+
+// domainStep resolves the public domain at Apply time, once the server IP is
+// known: vauban.yaml's domain, else <ip>.sslip.io. It outputs domain and
+// deployed_ip (the server IP the deploy secrets were set for).
+type domainStep struct{ domain string }
+
+func (domainStep) ID() string { return domainStepID }
+func (d domainStep) Describe() string {
+	if d.domain != "" {
+		return "deploy domain: " + d.domain
+	}
+	return "deploy domain: <server_ip>.sslip.io"
+}
+
+func (d domainStep) Apply(_ context.Context, env *engine.Env) (engine.Outputs, error) {
+	ip := env.In["server_ip"]
+	if ip == "" {
+		return nil, errors.New("deploy domain: no server_ip output (run infra first)")
+	}
+	domain := d.domain
+	if domain == "" {
+		domain = SSLipDomain(ip)
+	}
+	return engine.Outputs{"domain": domain, "deployed_ip": ip}, nil
+}
