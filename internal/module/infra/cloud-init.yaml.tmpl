@@ -1,0 +1,111 @@
+#cloud-config
+# managed by vauban: hardened Debian 13 (trixie) host running Docker.
+# Applied at first boot only; destroy and re-apply to rebuild the server.
+
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - ufw
+  - unattended-upgrades
+  - fail2ban
+  - python3-systemd
+
+disable_root: true
+ssh_pwauth: false
+
+groups:
+  - docker
+
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+{{- range .Keys}}
+      - {{.}}
+{{- end}}
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/10-vauban.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+  - path: /etc/fail2ban/jail.d/10-vauban.conf
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      backend = systemd
+  - path: /etc/apt/apt.conf.d/21vauban-auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+  - path: /etc/apt/apt.conf.d/52vauban-unattended-upgrades
+    permissions: "0644"
+    content: |
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"}}
+  - path: /etc/systemd/system/docker-prune.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Prune Docker images unused for 7 days
+      Requires=docker.service
+      After=docker.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/docker image prune -af --filter until=168h
+  - path: /etc/systemd/system/docker-prune.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Daily Docker image prune
+
+      [Timer]
+      OnCalendar=daily
+      RandomizedDelaySec=1h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  # Docker Engine from Docker's official apt repository (docs.docker.com/engine/install/debian).
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - |
+    cat > /etc/apt/sources.list.d/docker.sources <<EOF
+    Types: deb
+    URIs: https://download.docker.com/linux/debian
+    Suites: trixie
+    Components: stable
+    Architectures: $(dpkg --print-architecture)
+    Signed-By: /etc/apt/keyrings/docker.asc
+    EOF
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - systemctl enable --now docker
+  - systemctl daemon-reload
+  - systemctl enable --now docker-prune.timer
+  - systemctl restart ssh
+  - systemctl restart fail2ban
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw allow 443/udp
+  - ufw --force enable
+  - install -d -o deploy -g deploy -m 0755 /home/deploy/app
