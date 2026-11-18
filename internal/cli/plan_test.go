@@ -25,6 +25,7 @@ const planToken = "hcloud-plan-secret"
 type planProvider struct {
 	quota         *cloud.QuotaStatus
 	quotaErr      error
+	quotaFor      map[string]cloud.QuotaStatus // per size, over quota
 	quotaCalls    int
 	lastReplacing bool
 }
@@ -42,11 +43,14 @@ func (*planProvider) Regions(context.Context) ([]cloud.Option, error) {
 func (*planProvider) Sizes(context.Context, string) ([]cloud.Option, error) {
 	return []cloud.Option{{ID: "cx23", Label: "cx23"}}, nil
 }
-func (p *planProvider) Quota(_ context.Context, _, _ string, replacing bool) (cloud.QuotaStatus, error) {
+func (p *planProvider) Quota(_ context.Context, _, size string, replacing bool) (cloud.QuotaStatus, error) {
 	p.quotaCalls++
 	p.lastReplacing = replacing
 	if p.quotaErr != nil {
 		return cloud.QuotaStatus{}, p.quotaErr
+	}
+	if q, ok := p.quotaFor[size]; ok {
+		return q, nil
 	}
 	if p.quota != nil {
 		return *p.quota, nil

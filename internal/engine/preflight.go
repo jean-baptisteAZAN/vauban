@@ -29,7 +29,7 @@ type QuotaMode int
 const (
 	QuotaSkip  QuotaMode = iota // no server will be created: not checked
 	QuotaBlock                  // a new server: an exhausted quota fails preflight
-	QuotaWarn                   // an interrupted apply may have created resources: only warn
+	QuotaWarn                   // resuming an interrupted first apply: only warn
 )
 
 // PreflightOptions tunes the checks that depend on the infra state.
@@ -108,7 +108,7 @@ func checkQuota(prov cloud.Provider, c *config.Config, opts PreflightOptions, no
 	case !q.OK && opts.Quota == QuotaBlock:
 		return errors.New(q.Reason)
 	case !q.OK:
-		notices.Warnings = append(notices.Warnings, q.Reason+" (not blocking: an interrupted apply may already have created resources)")
+		notices.Warnings = append(notices.Warnings, q.Reason+" (not blocking: resuming an interrupted first apply, which may already have created resources)")
 	case q.Reason != "":
 		if why, ok := strings.CutPrefix(q.Reason, "not checked: "); ok {
 			notices.Notes = append(notices.Notes, prov.ID()+" quota not checked ("+why+")")

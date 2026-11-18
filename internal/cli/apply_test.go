@@ -642,3 +642,34 @@ func TestApplyResumeQuotaWarns(t *testing.T) {
 		})
 	}
 }
+
+// Drift of an applied server to a size whose per-type quota is exhausted is
+// blocked (a replacement, not a resume).
+func TestApplyDriftQuotaBlocks(t *testing.T) {
+	root, fr := applyEnv(t)
+	const msg = "hetzner: quota for cx33 in nbg1 is 0 — pick another size (vauban plan --size …) or request a quota increase at https://console.hetzner.com (project → Limits → Request change)"
+	prov := &planProvider{quotaFor: map[string]cloud.QuotaStatus{"cx33": {Reason: msg}}}
+	t.Cleanup(cloud.Register(prov))
+	saveState(t, root, staleState()) // hetzner/nbg1/cx23 applied, rendered_fingerprint set
+	writeFile(t, root, "infra/main.tf", infra.Marker+"\n# fingerprint: hetzner/nbg1/cx23\n")
+	writeFile(t, root, "infra/terraform.tfstate", `{"version":4,"resources":[{"type":"hcloud_server"}]}`)
+	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\nregion: nbg1\nsize: cx33\napp_port: 8080\n")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes")
+	wantExit(t, err, 1, "preflight failed — nothing was applied", out)
+	if !strings.Contains(out, msg) || strings.Contains(out, "not blocking") {
+		t.Errorf("want blocking quota reason in:\n%s", out)
+	}
+	if !prov.lastReplacing {
+		t.Error("Quota not told it replaces a server")
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("commands ran: %v", callLines(fr))
+	}
+
+	// The same size stays fine: only the new type's quota is exhausted.
+	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\nregion: nbg1\nsize: cx23\napp_port: 8080\n")
+	prov.quotaCalls = 0
+	if out, err := execPlan(t, root); err != nil || strings.Contains(out, msg) || prov.quotaCalls != 0 {
+		t.Errorf("no drift: err %v, quota calls %d\n%s", err, prov.quotaCalls, out)
+	}
+}

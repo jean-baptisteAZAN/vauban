@@ -111,18 +111,20 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	}, nil
 }
 
-// CheckCloud refuses a cloud change while servers are applied: the applied
-// fingerprint, or the main.tf on disk, names another cloud. With no applied
-// fingerprint (never applied, or after vauban destroy) any cloud is allowed.
+// CheckCloud refuses a cloud change while servers are applied, or may exist
+// after an interrupted first apply: the applied fingerprint, the rendered
+// one, or the main.tf on disk names another cloud. With neither an applied
+// nor a rendered fingerprint (never applied, or after vauban destroy, which
+// forgets the state but keeps main.tf) any cloud is allowed.
 // plan and apply call it before saving vauban.yaml, so a refused change is
 // never persisted.
 func CheckCloud(root string, st *engine.State, c *config.Config) error {
-	applied := st.Outputs["infra_fingerprint"]
-	if applied == "" {
+	applied, rendered := st.Outputs["infra_fingerprint"], st.Outputs["rendered_fingerprint"]
+	if applied == "" && rendered == "" {
 		return nil
 	}
 	disk, _ := readFingerprint(root)
-	for _, fp := range []string{applied, disk} {
+	for _, fp := range []string{applied, rendered, disk} {
 		if old, _, _ := strings.Cut(fp, "/"); fp != "" && old != c.Cloud {
 			return fmt.Errorf("changing cloud (%s → %s) is not supported in place: run vauban destroy first, then vauban apply", old, c.Cloud)
 		}

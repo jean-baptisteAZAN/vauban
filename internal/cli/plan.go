@@ -314,23 +314,26 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 	return pl, nil
 }
 
-// preflightOptions says how preflight treats the cloud quota. It is skipped
-// unless apply may create a server (infra:apply is to run and the applied
-// infra, if any, has another cloud/region/size). It only warns when an
-// interrupted apply may have left resources (a rendered fingerprint or a
-// non-empty tfstate): tofu and the quota hint on its error are the backstop.
+// preflightOptions says how preflight treats the cloud quota:
+//   - skip when apply creates no server (infra:apply done, or the applied
+//     infra already has this cloud/region/size);
+//   - block, with Replacing, on drift of an applied server (the per-type or
+//     per-zone quota of the new size still matters);
+//   - warn only on a true resume: nothing applied yet but a rendered
+//     fingerprint or a non-empty tfstate, so an interrupted first apply may
+//     have left resources (tofu and the quota hint on its error back it up);
+//   - block otherwise (a first create).
 func (pl *planned) preflightOptions(root string, c *config.Config) engine.PreflightOptions {
 	applied := pl.st.Outputs["infra_fingerprint"]
-	opts := engine.PreflightOptions{Replacing: applied != ""}
 	switch {
 	case pl.st.Done["infra:apply"] || applied == infraFingerprint(c):
-		opts.Quota = engine.QuotaSkip
+		return engine.PreflightOptions{Quota: engine.QuotaSkip, Replacing: applied != ""}
+	case applied != "":
+		return engine.PreflightOptions{Quota: engine.QuotaBlock, Replacing: true}
 	case pl.st.Outputs["rendered_fingerprint"] != "" || nonEmpty(filepath.Join(root, "infra", "terraform.tfstate")):
-		opts.Quota = engine.QuotaWarn
-	default:
-		opts.Quota = engine.QuotaBlock
+		return engine.PreflightOptions{Quota: engine.QuotaWarn}
 	}
-	return opts
+	return engine.PreflightOptions{Quota: engine.QuotaBlock}
 }
 
 func nonEmpty(path string) bool {
