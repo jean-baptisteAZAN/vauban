@@ -21,10 +21,13 @@ type CaddyInfo struct {
 	SitesHostDir         string // host dir bind-mounted at /etc/caddy/sites, "" if none
 	CaddyfileHostPath    string // host path of the Caddyfile, "" if not on a host bind
 	HasImport, OnNetwork bool
+	DirBind              bool // whole /etc/caddy bound from the host; sites is then <src>/sites
+	SitesDirExists       bool // /etc/caddy/sites exists inside the container
 }
 
 // Facts is the parsed output of the audit script.
 type Facts struct {
+	User, DockerAccess                                      string // ssh user; direct|sudo|denied|unavailable|absent
 	OSID, OSLike, OSPretty                                  string
 	Sudo, Docker, Compose, DockerGroup, DeployUser, Network bool
 	Ports                                                   map[int]string // port -> owner process or container, absent when free
@@ -60,7 +63,7 @@ func RunAudit(ctx context.Context, r engine.Runner, t Target, project, repo stri
 func ParseFacts(out []byte) (Facts, error) {
 	f := Facts{Ports: map[int]string{}}
 	var caddyName, mounts, networks string
-	var caddyImport, known bool
+	var caddyImport, sitesExist, known, done bool
 	for _, line := range strings.Split(string(out), "\n") {
 		k, v, ok := strings.Cut(strings.TrimRight(line, "\r"), "=")
 		if !ok {
@@ -75,6 +78,14 @@ func ParseFacts(out []byte) (Facts, error) {
 			f.OSLike = v
 		case "os_pretty":
 			f.OSPretty = v
+		case "audit_done":
+			done = yes || v == "1"
+		case "ssh_user":
+			f.User = v
+		case "docker_access":
+			f.DockerAccess = v
+		case "caddy_sites_dir":
+			sitesExist = yes
 		case "sudo":
 			f.Sudo = yes
 		case "docker":
@@ -124,8 +135,12 @@ func ParseFacts(out []byte) (Facts, error) {
 	if !known {
 		return Facts{}, errors.New("audit output has no recognised key")
 	}
+	if !done {
+		return Facts{}, errors.New("audit output truncated")
+	}
 	if caddyName != "" {
 		f.Caddy = caddyInfo(caddyName, mounts, networks, caddyImport)
+		f.Caddy.SitesDirExists = sitesExist
 	}
 	return f, nil
 }
@@ -141,19 +156,27 @@ func caddyInfo(name, mountsJSON, networks string, hasImport bool) *CaddyInfo {
 	if json.Unmarshal([]byte(mountsJSON), &ms) != nil {
 		return c
 	}
+	var sites, file, dir string
 	for _, m := range ms {
 		if m.Type != "bind" { // named volumes are not editable from the host
 			continue
 		}
 		switch m.Destination {
 		case "/etc/caddy/sites":
-			c.SitesHostDir = m.Source
+			sites = m.Source
 		case "/etc/caddy/Caddyfile":
-			c.CaddyfileHostPath = m.Source
+			file = m.Source
 		case "/etc/caddy":
-			if c.CaddyfileHostPath == "" {
-				c.CaddyfileHostPath = strings.TrimRight(m.Source, "/") + "/Caddyfile"
-			}
+			dir = strings.TrimRight(m.Source, "/")
+		}
+	}
+	c.SitesHostDir, c.CaddyfileHostPath = sites, file
+	if dir != "" {
+		if file == "" {
+			c.CaddyfileHostPath = dir + "/Caddyfile"
+		}
+		if sites == "" {
+			c.SitesHostDir, c.DirBind = dir+"/sites", true
 		}
 	}
 	return c

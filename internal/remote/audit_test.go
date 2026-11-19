@@ -51,7 +51,7 @@ func TestParseFacts(t *testing.T) {
 }
 
 func TestParseFactsTolerance(t *testing.T) {
-	f, err := ParseFacts([]byte("future_key=1\nsudo=yes\nnoise line\n"))
+	f, err := ParseFacts([]byte("future_key=1\nsudo=yes\nnoise line\naudit_done=1\n"))
 	if err != nil || !f.Sudo || f.Docker || f.DiskFreeGB != 0 {
 		t.Fatalf("%+v %v", f, err)
 	}
@@ -64,9 +64,13 @@ func TestParseFactsTolerance(t *testing.T) {
 	// bind of /etc/caddy: Caddyfile inside it.
 	f, err = ParseFacts([]byte(`caddy_container=c
 caddy_mounts=[{"Type":"bind","Source":"/srv/c","Destination":"/etc/caddy"}]
+audit_done=1
 `))
-	if err != nil || f.Caddy.CaddyfileHostPath != "/srv/c/Caddyfile" || f.Caddy.SitesHostDir != "" {
+	if err != nil || f.Caddy.CaddyfileHostPath != "/srv/c/Caddyfile" || f.Caddy.SitesHostDir != "/srv/c/sites" || !f.Caddy.DirBind {
 		t.Fatalf("%+v %v", f.Caddy, err)
+	}
+	if _, err := ParseFacts([]byte("sudo=yes\ndocker=yes\n")); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("missing sentinel must error truncated, got %v", err)
 	}
 }
 
@@ -186,6 +190,69 @@ func TestEvaluate(t *testing.T) {
 	})
 }
 
+func TestEvaluateFixRound1(t *testing.T) {
+	const repo = "me/shop"
+	t.Run("docker-denied", func(t *testing.T) {
+		f := fixture(t, "audit-docker-denied.txt")
+		if f.DockerAccess != "denied" || f.User != "ops" {
+			t.Fatalf("%+v", f)
+		}
+		a := Evaluate(f, repo)
+		if !hasBlocker(a, "Docker is installed but ops cannot use it: add ops to the docker group or allow passwordless sudo") || hasBlocker(a, "Docker missing") {
+			t.Fatal(a.Blockers())
+		}
+	})
+	t.Run("nosudo-free-ports", func(t *testing.T) {
+		a := Evaluate(fixture(t, "audit-nosudo-free.txt"), repo)
+		if a.Caddy != CaddyInstall || !hasBlocker(a, "installing Caddy needs passwordless sudo") || check(a, "Caddy container").Status != "blocked" {
+			t.Fatalf("%v %v %+v", a.Caddy, a.Blockers(), a.Checks)
+		}
+	})
+	t.Run("owner-unknown", func(t *testing.T) {
+		f := fixture(t, "audit-user-caddy-ready.txt")
+		if f.ProjectOwner != "?" {
+			t.Fatal(f.ProjectOwner)
+		}
+		a := Evaluate(f, repo)
+		if c := check(a, "Project dir"); c.Status != "warn" || !strings.Contains(c.Detail, "checked again at apply") || len(a.Blockers()) != 0 {
+			t.Fatalf("%+v %v", c, a.Blockers())
+		}
+	})
+	t.Run("dir-bind", func(t *testing.T) {
+		f := fixture(t, "audit-caddy-dirbind.txt")
+		c := f.Caddy
+		if c.SitesHostDir != "/srv/c/sites" || c.CaddyfileHostPath != "/srv/c/Caddyfile" || !c.SitesDirExists {
+			t.Fatalf("%+v", c)
+		}
+		a := Evaluate(f, repo)
+		if a.Caddy != CaddyUserReady || a.SitesDir != "/srv/c/sites" {
+			t.Fatalf("%v %q", a.Caddy, a.SitesDir)
+		}
+		f.Caddy.SitesDirExists = false
+		a = Evaluate(f, repo)
+		g := CaddyGuide(a)
+		if a.Caddy != CaddyUserNeedsSetup || !strings.Contains(g, "mkdir -p /srv/c/sites && sudo chown deploy /srv/c/sites") || strings.Contains(g, "volumes:") {
+			t.Fatalf("%v\n%s", a.Caddy, g)
+		}
+	})
+}
+
+func TestCaddyGuideOnlyMountMissing(t *testing.T) {
+	f := fixture(t, "audit-user-caddy-ready.txt")
+	f.Caddy.SitesHostDir = ""
+	g := CaddyGuide(Evaluate(f, "me/shop"))
+	for _, want := range []string{"- /srv/proxy/sites:/etc/caddy/sites:ro", "mkdir -p /srv/proxy/sites && sudo chown deploy /srv/proxy/sites", "docker compose up -d", "vauban apply"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guide missing %q:\n%s", want, g)
+		}
+	}
+	for _, not := range []string{"import /etc/caddy", "networks:"} {
+		if strings.Contains(g, not) {
+			t.Errorf("guide must not contain %q:\n%s", not, g)
+		}
+	}
+}
+
 func TestCaddyGuideTailored(t *testing.T) {
 	f := fixture(t, "audit-user-caddy-ready.txt")
 	f.Caddy.HasImport, f.Caddy.OnNetwork, f.Caddy.SitesHostDir = false, false, ""
@@ -251,16 +318,17 @@ func TestAuditScriptReadOnly(t *testing.T) {
 	text := strings.NewReplacer("have sudo", "", "sudo_ok", "", "emit sudo", "").Replace(auditScript)
 	sudo := regexp.MustCompile(`sudo (\S+ ?\S* ?\S*)`)
 	for _, m := range sudo.FindAllStringSubmatch(text, -1) {
-		if !strings.HasPrefix(m[1], "-n true") && !strings.HasPrefix(m[1], "-n sshd -T") && !strings.HasPrefix(m[1], "-n docker") {
+		if !strings.HasPrefix(m[1], "-n true") && !strings.HasPrefix(m[1], "-n sshd -T") &&
+			!strings.HasPrefix(m[1], `-n docker"`) && !strings.HasPrefix(m[1], "-n docker version") {
 			t.Errorf("disallowed sudo use: sudo %s", m[1])
 		}
 	}
-	// sudo docker is only reachable through $D: restrict its subcommands.
+	// sudo docker is only reachable through $D: exactly these read-only subcommands.
 	use := regexp.MustCompile(`\$D (\S+ ?\S*)`)
 	for _, m := range use.FindAllStringSubmatch(auditScript, -1) {
 		ok := false
-		for _, p := range []string{"version", "compose version", "ps", "inspect", "network ls", "exec"} {
-			if strings.HasPrefix(m[1], p) {
+		for _, p := range []string{"compose version", "ps ", "inspect ", "network ls ", "exec "} {
+			if strings.HasPrefix(m[1]+" ", p) {
 				ok = true
 			}
 		}
@@ -268,9 +336,9 @@ func TestAuditScriptReadOnly(t *testing.T) {
 			t.Errorf("disallowed docker use: $D %s", m[1])
 		}
 	}
-	for _, m := range regexp.MustCompile(`\$D exec (\S+) (\S+)`).FindAllStringSubmatch(auditScript, -1) {
-		if m[2] != "cat" {
-			t.Errorf("docker exec must be cat, got %q", m[2])
+	for _, m := range regexp.MustCompile(`\$D exec (\S+) (\S+) ?(\S*)`).FindAllStringSubmatch(auditScript, -1) {
+		if !(m[2] == "cat" || (m[2] == "test" && m[3] == "-d")) {
+			t.Errorf("docker exec must be cat or test -d, got %q %q", m[2], m[3])
 		}
 	}
 }

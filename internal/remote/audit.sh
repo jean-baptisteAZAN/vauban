@@ -28,14 +28,21 @@ elif have sudo && sudo -n true >/dev/null 2>&1; then
 fi
 emit sudo "$sudo_ok"
 
-# Docker (direct, or via passwordless root when the docker group is missing)
+# Docker: direct, or read-only probes through passwordless root when the docker group is missing
 D=""
-docker_ok=no; compose_ok=no
+docker_ok=no; compose_ok=no; access=absent
+emit ssh_user "$(id -un 2>/dev/null)"
 if have docker; then
+	derr=$(docker version 2>&1 >/dev/null)
 	if docker version >/dev/null 2>&1; then
-		D="docker"
+		D="docker"; access=direct
 	elif [ "$sudo_ok" = yes ] && sudo -n docker version >/dev/null 2>&1; then
-		D="sudo -n docker"
+		D="sudo -n docker"; access=sudo
+	else
+		case "$derr" in
+			*ermission*) access=denied ;;
+			*) access=unavailable ;;
+		esac
 	fi
 fi
 if [ -n "$D" ]; then
@@ -43,6 +50,7 @@ if [ -n "$D" ]; then
 	$D compose version >/dev/null 2>&1 && compose_ok=yes
 fi
 emit docker "$docker_ok"
+emit docker_access "$access"
 emit compose "$compose_ok"
 if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then emit docker_group yes; else emit docker_group no; fi
 
@@ -59,11 +67,28 @@ owner=""
 case "$project" in
 	"" | */* | .*) ;;
 	*)
-		if [ -n "$deploy_home" ] && [ -d "$deploy_home/apps/$project" ]; then
-			owner="-"
-			if [ -r "$deploy_home/apps/$project/.vauban-owner" ]; then
-				owner=$(head -n 1 "$deploy_home/apps/$project/.vauban-owner" 2>/dev/null | tr -d ' \r')
-				[ -n "$owner" ] || owner="-"
+		# "?" means unknown: ~deploy is often not traversable by a non-root ssh user
+		if [ -n "$deploy_home" ]; then
+			pd="$deploy_home/apps/$project"
+			if [ ! -x "$deploy_home" ]; then
+				owner="?"
+			elif [ -d "$deploy_home/apps" ]; then
+				if [ ! -x "$deploy_home/apps" ]; then
+					owner="?"
+				elif [ -d "$pd" ]; then
+					if [ ! -x "$pd" ]; then
+						owner="?"
+					elif [ -e "$pd/.vauban-owner" ]; then
+						if [ -r "$pd/.vauban-owner" ]; then
+							owner=$(head -n 1 "$pd/.vauban-owner" 2>/dev/null | tr -d ' \r')
+							[ -n "$owner" ] || owner="-"
+						else
+							owner="?"
+						fi
+					else
+						owner="-"
+					fi
+				fi
 			fi
 		fi
 		;;
@@ -117,6 +142,11 @@ emit caddy_container "$caddy"
 if [ -n "$caddy" ]; then
 	emit caddy_mounts "$($D inspect -f '{{json .Mounts}}' "$caddy" 2>/dev/null)"
 	emit caddy_networks "$($D inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$caddy" 2>/dev/null)"
+	if $D exec "$caddy" test -d /etc/caddy/sites >/dev/null 2>&1; then
+		emit caddy_sites_dir yes
+	else
+		emit caddy_sites_dir no
+	fi
 	if $D exec "$caddy" cat /etc/caddy/Caddyfile 2>/dev/null | grep -qE '^[[:space:]]*import[[:space:]]+/etc/caddy/sites/\*\.caddy[[:space:]]*$'; then
 		emit caddy_import yes
 	else
@@ -126,8 +156,10 @@ fi
 
 # Firewall (ufw only, readable status needs root; otherwise unknown)
 fw=none
-if have ufw; then
-	st=$(ufw status 2>/dev/null)
+ufw_bin=""
+if have ufw; then ufw_bin=ufw; elif [ -x /usr/sbin/ufw ]; then ufw_bin=/usr/sbin/ufw; fi
+if [ -n "$ufw_bin" ]; then
+	st=$("$ufw_bin" status 2>/dev/null)
 	case "$st" in
 		*"Status: inactive"*) fw=inactive ;;
 		*"Status: active"*)
@@ -153,4 +185,5 @@ if have apt; then
 	upd=$(apt list --upgradable 2>/dev/null | grep -c '/')
 fi
 emit pending_updates "$upd"
+emit audit_done 1
 exit 0
