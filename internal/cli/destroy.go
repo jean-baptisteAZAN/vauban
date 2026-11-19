@@ -20,6 +20,7 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/detect"
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
+	"github.com/jean-baptisteAZAN/vauban/internal/module/server"
 	"github.com/jean-baptisteAZAN/vauban/internal/tools"
 	"github.com/jean-baptisteAZAN/vauban/internal/ui"
 )
@@ -80,6 +81,9 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	}
 	if c.Existing() {
 		return runDestroyExisting(cmd, root, c, st, p, purge)
+	}
+	if applied := server.AppliedTarget(st); applied != "" {
+		return &ExitError{Code: 1, Err: fmt.Errorf("this project is deployed on %s (target: existing) but vauban.yaml says target: cloud: set target: existing and its server: block back in vauban.yaml, then run vauban destroy — nothing was destroyed", applied)}
 	}
 	managed := infra.IsManaged(root)
 	// The cloud the infra was applied on, which vauban.yaml may no longer name.

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/module"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/deploy"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
+	"github.com/jean-baptisteAZAN/vauban/internal/module/server"
 	"github.com/jean-baptisteAZAN/vauban/internal/ui"
 )
 
@@ -91,6 +93,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	}
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
+	writeSiteChange(w, pl, c)
 	switch {
 	case c.Existing():
 		fmt.Fprintln(w)
@@ -116,13 +119,16 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 
 // saveConfig saves c as soon as it is resolved, before the plan builds, so
 // answers survive a failing plan, but only once infra accepts the cloud: a
-// refused cloud change must never reach vauban.yaml (destroy reads it).
+// refused cloud or server change must never reach vauban.yaml (destroy reads it).
 func saveConfig(root string, c *config.Config) error {
 	st, err := engine.LoadState(root)
 	if err != nil {
 		return err
 	}
 	if err := infra.CheckCloud(root, st, c); err != nil {
+		return err
+	}
+	if err := server.CheckTarget(st, c); err != nil {
 		return err
 	}
 	return c.Save(root)
@@ -284,6 +290,7 @@ type planned struct {
 	groups     []moduleSteps
 	st         *engine.State
 	infraStale []string
+	siteStale  string // the applied server_site when the site is rewritten, else ""
 }
 
 // buildPlan scans root and returns the ordered steps of every module and the
@@ -324,6 +331,11 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 	if len(pl.infraStale) > 0 {
 		// The server may be replaced: re-read its IP after infra:output.
 		stale = append(stale, deploy.ServerSteps()...)
+	}
+	if site := server.StaleSteps(pl.st, c); len(site) > 0 {
+		// A new domain or app port: rewrite the site and the deploy secrets.
+		pl.siteStale = cmp.Or(pl.st.Outputs["server_site"], "unrecorded")
+		stale = slices.Concat(stale, site, deploy.ExistingServerSteps())
 	}
 	for _, id := range stale {
 		delete(pl.st.Done, id)
@@ -472,6 +484,15 @@ func writeDrift(w io.Writer, root string, st *engine.State, c *config.Config, st
 	if disk := infra.RenderedFingerprint(root); disk != "" && disk != want {
 		ui.Section(w, "infra", "infra/main.tf was rendered for "+disk+"; apply re-renders it for "+want)
 	}
+}
+
+// writeSiteChange says why the Caddy site and deploy secrets run again.
+func writeSiteChange(w io.Writer, pl *planned, c *config.Config) {
+	if pl.siteStale == "" {
+		return
+	}
+	ui.Section(w, "site", "domain or port changed: "+pl.siteStale+" → "+server.SiteFingerprint(c)+
+		"; apply rewrites the Caddy site ("+c.Project+".caddy, replacing the old one) and the deploy secrets")
 }
 
 // infraFingerprint is cloud/region/size with provider defaults filled in,

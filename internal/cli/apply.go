@@ -101,6 +101,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	writeConfigSummary(w, p, c)
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
+	writeSiteChange(w, pl, c)
 	fmt.Fprintln(w)
 
 	if !yes {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -170,7 +171,7 @@ type siteStep struct {
 	port          int
 }
 
-func (siteStep) ID() string { return "server:site" }
+func (siteStep) ID() string { return siteStepID }
 func (s siteStep) Describe() string {
 	return "write the Caddy site for " + s.domain + " on " + s.t.Host + " and reload Caddy"
 }
@@ -224,5 +225,5 @@ func (s siteStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, e
 	if _, err := run("reload"); err != nil {
 		return nil, fmt.Errorf("caddy reload failed: %w", trimLines(err, 20))
 	}
-	return nil, nil
+	return engine.Outputs{"server_site": s.domain + "|" + strconv.Itoa(s.port)}, nil
 }

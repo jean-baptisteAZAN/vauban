@@ -148,6 +148,10 @@ func TestDestroyExistingConfirmed(t *testing.T) {
 func TestDestroyExistingDirectMode(t *testing.T) {
 	root, f := existingDestroyEnv(t)
 	writeFile(t, root, config.FileName, strings.Replace(destroyExistingYAML, "user: ops", "user: deploy", 1))
+	// destroy uses the user the project was applied with (server_target).
+	st, _ := engine.LoadState(root)
+	st.Outputs["server_user"] = "deploy"
+	saveState(t, root, st)
 	if out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop"); err != nil {
 		t.Fatalf("destroy: %v\n%s", err, out)
 	}

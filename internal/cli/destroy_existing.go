@@ -70,7 +70,19 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 	if c.Server == nil {
 		return errors.New("target existing needs a server: block")
 	}
-	t, err := remote.TargetFor(root, c.Server)
+	w := cmd.OutOrStdout()
+	// The server the project is deployed on, which vauban.yaml may no longer
+	// name (edited by hand); the key still comes from vauban.yaml.
+	srv := *c.Server
+	if applied := server.AppliedTarget(st); applied != "" {
+		if rec, ok := server.ParseTarget(applied); ok {
+			if want := server.TargetString(srv.User, srv.Host, srv.SSHPort()); want != applied {
+				ui.Warning(w, fmt.Sprintf("vauban.yaml names %s but this project is deployed on %s: destroying it there", want, applied))
+			}
+			srv.User, srv.Host, srv.Port = rec.User, rec.Host, rec.Port
+		}
+	}
+	t, err := remote.TargetFor(root, &srv)
 	if err != nil {
 		return err
 	}
@@ -78,7 +90,6 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 	ctx, sig := watchSignals(cmd.Context(), cmd.ErrOrStderr(), tty)
 	defer sig.stop()
 	run := sig.runner(cmdRunner)
-	w := cmd.OutOrStdout()
 
 	_, problems := destroyPreflight(ctx, root, "", p.GitHubRepo, false)
 	if p.GitHubRepo == "" {
