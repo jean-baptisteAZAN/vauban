@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/x/term"
@@ -21,6 +23,7 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/module"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/deploy"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
+	"github.com/jean-baptisteAZAN/vauban/internal/module/server"
 	"github.com/jean-baptisteAZAN/vauban/internal/ui"
 )
 
@@ -53,6 +56,7 @@ func addConfigFlags(cmd *cobra.Command) {
 	f.String("domain", "", "public domain (default: <ip>.sslip.io)")
 	f.Int("port", 0, "port the app listens on (default: from Dockerfile or stack)")
 	f.Bool("reconfigure", false, "ask again even if vauban.yaml exists")
+	addTargetFlags(cmd)
 }
 
 func runPlan(cmd *cobra.Command, _ []string) error {
@@ -83,32 +87,57 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 
 	w := cmd.OutOrStdout()
 	writeConfigSummary(w, p, c)
+	var auditLines []string
+	if c.Existing() {
+		fmt.Fprintln(w)
+		auditLines, _ = writeAudit(cmd.Context(), w, root, p.GitHubRepo, c)
+	}
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
-	if c.Domain != "" {
+	writeSiteChange(w, pl, c)
+	switch {
+	case c.Existing():
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "DNS: point "+c.Domain+" to "+c.Server.Host)
+	case c.Domain != "":
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "DNS: point "+c.Domain+" to the server IP (shown after apply)")
 	}
 	notices, err := engine.Preflight(pl.p, c, pl.mods, pl.preflightOptions(root, c))
-	var lines []string
+	lines := auditLines
+	if c.Existing() && c.Server != nil {
+		if hw := hostWarning(c.Server.Host); hw != "" {
+			lines = append(lines, hw)
+		}
+		if pw := portWarning(pl.st, c, force); pw != "" {
+			lines = append(lines, pw)
+		}
+	}
 	if err != nil {
-		lines = strings.Split(err.Error(), "\n")
+		lines = append(lines, strings.Split(err.Error(), "\n")...)
 	}
 	ui.Warnings(w, "before apply:", append(lines, notices.Warnings...))
 	writeNotes(w, notices.Notes)
+	if c.Existing() {
+		ui.PlanFooterExisting(w)
+		return nil
+	}
 	ui.PlanFooter(w)
 	return nil
 }
 
 // saveConfig saves c as soon as it is resolved, before the plan builds, so
 // answers survive a failing plan, but only once infra accepts the cloud: a
-// refused cloud change must never reach vauban.yaml (destroy reads it).
+// refused cloud or server change must never reach vauban.yaml (destroy reads it).
 func saveConfig(root string, c *config.Config) error {
 	st, err := engine.LoadState(root)
 	if err != nil {
 		return err
 	}
 	if err := infra.CheckCloud(root, st, c); err != nil {
+		return err
+	}
+	if err := server.CheckTarget(st, c); err != nil {
 		return err
 	}
 	return c.Save(root)
@@ -141,6 +170,9 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	if existing != nil {
 		*c = *existing
 	}
+	if err := applyTargetFlags(cmd, c); err != nil {
+		return nil, err
+	}
 	for name, dst := range map[string]*string{"cloud": &c.Cloud, "region": &c.Region, "size": &c.Size, "domain": &c.Domain} {
 		if f.Changed(name) {
 			*dst, _ = f.GetString(name)
@@ -149,7 +181,7 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	if f.Changed("port") {
 		c.AppPort, _ = f.GetInt("port")
 	}
-	if existing != nil && c.Cloud != existing.Cloud {
+	if existing != nil && !c.Existing() && c.Cloud != existing.Cloud {
 		if !f.Changed("region") {
 			c.Region = ""
 		}
@@ -161,6 +193,10 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	if existing == nil || reconfigure {
 		if interactive() && !yes {
 			if c, err = ui.AskConfig(p, c, formSources(p)); err != nil {
+				return nil, err
+			}
+		} else if c.Existing() {
+			if err := missingExistingFlags(c); err != nil {
 				return nil, err
 			}
 		} else if c.Cloud == "" {
@@ -245,6 +281,7 @@ func formSources(p *detect.Project) ui.Sources {
 			return choices(prov.Sizes(ctx, region))
 		},
 		DefaultPort: defaultPort(p),
+		SSHKeys:     sshKeyChoices,
 	}
 }
 
@@ -262,6 +299,7 @@ type planned struct {
 	groups     []moduleSteps
 	st         *engine.State
 	infraStale []string
+	siteStale  string // the applied server_site when the site is rewritten, else ""
 }
 
 // buildPlan scans root and returns the ordered steps of every module and the
@@ -295,11 +333,21 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 	if pl.st, err = engine.LoadState(root); err != nil {
 		return nil, err
 	}
-	pl.infraStale = infra.StaleSteps(root, pl.st, c)
-	stale := slices.Concat(pl.infraStale, deploy.StaleSteps(pl.st, c))
+	if !c.Existing() { // no infra module, no infra fingerprint
+		pl.infraStale = infra.StaleSteps(root, pl.st, c)
+	}
+	stale := slices.Concat(pl.infraStale, deploy.StaleSteps(pl.st, c), deploy.KnownHostsStale(root, pl.st, c))
 	if len(pl.infraStale) > 0 {
 		// The server may be replaced: re-read its IP after infra:output.
 		stale = append(stale, deploy.ServerSteps()...)
+	}
+	for _, id := range server.StaleSteps(pl.st, c) {
+		stale = append(stale, id)
+		if id == "server:site" {
+			// A new domain or app port: rewrite the site and the deploy secrets.
+			pl.siteStale = cmp.Or(pl.st.Outputs["server_site"], "unrecorded")
+			stale = append(stale, deploy.ExistingServerSteps()...)
+		}
 	}
 	for _, id := range stale {
 		delete(pl.st.Done, id)
@@ -324,6 +372,9 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 //     have left resources (tofu and the quota hint on its error back it up);
 //   - block otherwise (a first create).
 func (pl *planned) preflightOptions(root string, c *config.Config) engine.PreflightOptions {
+	if c.Existing() {
+		return engine.PreflightOptions{Quota: engine.QuotaSkip}
+	}
 	applied := pl.st.Outputs["infra_fingerprint"]
 	switch {
 	case pl.st.Done["infra:apply"] || applied == infraFingerprint(c):
@@ -414,7 +465,11 @@ func planItem(s engine.Step, root string, st *engine.State, overwrite bool) ui.P
 
 func writeConfigSummary(w io.Writer, p *detect.Project, c *config.Config) {
 	ui.Heading(w, p.Name)
-	ui.Row(w, "cloud", orDefault(cloudLabels[c.Cloud], c.Cloud)+" · "+c.Region+" · "+c.Size)
+	if c.Existing() && c.Server != nil {
+		ui.Row(w, "server", fmt.Sprintf("%s@%s:%d", c.Server.User, c.Server.Host, c.Server.SSHPort()))
+	} else {
+		ui.Row(w, "cloud", orDefault(cloudLabels[c.Cloud], c.Cloud)+" · "+c.Region+" · "+c.Size)
+	}
 	ui.Row(w, "domain", orDefault(c.Domain, "<ip>.sslip.io"+ui.Hint(" (after apply)")))
 	ui.Row(w, "port", fmt.Sprint(c.AppPort))
 }
@@ -441,6 +496,30 @@ func writeDrift(w io.Writer, root string, st *engine.State, c *config.Config, st
 	if disk := infra.RenderedFingerprint(root); disk != "" && disk != want {
 		ui.Section(w, "infra", "infra/main.tf was rendered for "+disk+"; apply re-renders it for "+want)
 	}
+}
+
+// portWarning warns when app_port differs from the port the site was
+// written for and --force is not set: the generated workflow (skipped as an
+// existing file) still deploys with the old APP_PORT, so Caddy, rewritten
+// for the new port, returns 502. "" otherwise.
+func portWarning(st *engine.State, c *config.Config, force bool) string {
+	rec := st.Outputs["server_site"]
+	i := strings.LastIndex(rec, "|")
+	if !c.Existing() || force || i < 0 || rec[i+1:] == strconv.Itoa(c.AppPort) {
+		return ""
+	}
+	old := rec[i+1:]
+	return "app_port changed (" + old + " → " + strconv.Itoa(c.AppPort) + ") but the deploy workflow still sets APP_PORT=" + old +
+		": rerun with --force to regenerate the deploy files, then push; until then Caddy returns 502"
+}
+
+// writeSiteChange says why the Caddy site and deploy secrets run again.
+func writeSiteChange(w io.Writer, pl *planned, c *config.Config) {
+	if pl.siteStale == "" {
+		return
+	}
+	ui.Section(w, "site", "domain or port changed: "+pl.siteStale+" → "+server.SiteFingerprint(c)+
+		"; apply rewrites the Caddy site ("+c.Project+".caddy, replacing the old one) and the deploy secrets")
 }
 
 // infraFingerprint is cloud/region/size with provider defaults filled in,

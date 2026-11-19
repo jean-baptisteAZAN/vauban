@@ -99,8 +99,26 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	ui.Warnings(w, "warnings:", notices.Warnings)
 	writeNotes(w, notices.Notes)
 	writeConfigSummary(w, p, c)
+	if c.Existing() {
+		// The server as it is now, before asking: blockers or a pending
+		// Caddy change stop here, before any change. The server:audit step
+		// runs it again on a first apply (its outputs feed the other steps).
+		fmt.Fprintln(w)
+		if hw := hostWarning(c.Server.Host); hw != "" {
+			ui.Warning(w, hw)
+		}
+		if pw := portWarning(pl.st, c, force); pw != "" {
+			ui.Warning(w, pw)
+		}
+		lines, stop := writeAudit(ctx, w, root, p.GitHubRepo, c)
+		if stop {
+			ui.Warnings(w, "cannot apply:", lines)
+			return &ExitError{Code: 1, Err: errors.New("the server is not ready (see above) — nothing was applied")}
+		}
+	}
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
+	writeSiteChange(w, pl, c)
 	fmt.Fprintln(w)
 
 	if !yes {
@@ -146,6 +164,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	ui.ApplyFooter(w, footer(c, pl.st, before))
+	if c.Existing() {
+		fmt.Fprintln(w, ui.Hint("deploys run from GitHub Actions: push to main to deploy https://"+c.Domain))
+	}
 	return nil
 }
 
@@ -154,7 +175,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 // secrets changed (steps newly done since before) so a push redeploys.
 func footer(c *config.Config, st *engine.State, before map[string]bool) ui.Footer {
 	f := ui.Footer{Domain: st.Outputs["domain"]}
-	if c.Domain != "" {
+	if c.Existing() {
+		f.Domain = c.Domain
+	}
+	if c.Domain != "" && !c.Existing() { // an existing server's DNS is the plan's line
 		if ip := st.Outputs["server_ip"]; ip != "" {
 			f.DNS = append(f.DNS, "A "+c.Domain+" → "+ip)
 		}

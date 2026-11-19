@@ -74,6 +74,9 @@ func (*Module) Detect(p *detect.Project) engine.Status {
 // StaleSteps reports drift (or with --force). Changes always go through a
 // saved plan: init, plan (saved to infra/tfplan), apply of that plan.
 func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) {
+	if c.Existing() {
+		return nil, nil // the server module prepares an existing machine
+	}
 	if p.HasTerraform && !IsManaged(p.Root) {
 		return nil, nil
 	}
@@ -100,7 +103,7 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	}
 	tofu, _ := tools.Tofu()
 	return []engine.Step{
-		deployKey{project: name, path: keyPath},
+		deployKey{id: "infra:deploy-key", project: name, path: keyPath},
 		mainTF{prov: prov, in: in, fp: fingerprint(c), keyPath: keyPath, rerender: StaleSteps(p.Root, st, c) != nil},
 		cloudInit{keyPath: keyPath},
 		engine.WriteFile{Path: dir + "/.gitignore", Content: []byte(gitignore), Mode: 0o644},
@@ -111,7 +114,8 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	}, nil
 }
 
-// CheckCloud refuses a cloud change while servers are applied, or may exist
+// CheckCloud refuses a cloud change (a switch to target: existing counts as
+// one) while servers are applied, or may exist
 // after an interrupted first apply: the applied fingerprint, the rendered
 // one, or the main.tf on disk names another cloud. With neither an applied
 // nor a rendered fingerprint (never applied, or after vauban destroy, which
@@ -125,7 +129,11 @@ func CheckCloud(root string, st *engine.State, c *config.Config) error {
 	}
 	disk, _ := readFingerprint(root)
 	for _, fp := range []string{applied, rendered, disk} {
-		if old, _, _ := strings.Cut(fp, "/"); fp != "" && old != c.Cloud {
+		old, _, _ := strings.Cut(fp, "/")
+		if fp != "" && c.Existing() {
+			return fmt.Errorf("changing target (cloud → existing) is not supported in place: run vauban destroy first, then vauban apply")
+		}
+		if fp != "" && old != c.Cloud {
 			return fmt.Errorf("changing cloud (%s → %s) is not supported in place: run vauban destroy first, then vauban apply", old, c.Cloud)
 		}
 	}
@@ -348,9 +356,19 @@ func (a applyStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, 
 
 // deployKey creates the project's passphrase-less deploy key pair unless it
 // exists. It outputs the key path and public key, never the private key.
-type deployKey struct{ project, path string }
+type deployKey struct{ id, project, path string }
 
-func (d deployKey) ID() string { return "infra:deploy-key" }
+// NewDeployKey returns the deploy-key step for project under the given step
+// ID, so other modules (server) reuse the same key pair and ssh-keygen logic.
+func NewDeployKey(project, stepID string) (engine.Step, error) {
+	path, err := DeployKeyPath(project)
+	if err != nil {
+		return nil, err
+	}
+	return deployKey{id: stepID, project: keyName(project), path: path}, nil
+}
+
+func (d deployKey) ID() string { return d.id }
 func (deployKey) Kind() string { return engine.KindCommand }
 func (d deployKey) Describe() string {
 	return `deploy key: $ ssh-keygen -t ed25519 -N "" -C vauban-` + d.project + " -f " + d.path

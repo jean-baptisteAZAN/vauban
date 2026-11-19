@@ -154,3 +154,83 @@ if [ "$1" = login ]; then cat > "$DOCKER_CONFIG/config.json"; fi
 		t.Errorf("local deploy key: %v %v", st, err)
 	}
 }
+
+// existingDeployRun runs the existing-server "Deploy over SSH" step against a
+// fake remote: ssh runs its last argument with bash in remote, scp logs its
+// arguments. It returns the output, the scp log and the error.
+func existingDeployRun(t *testing.T, owner string, env ...string) (string, string, error) {
+	t.Helper()
+	w := parseWorkflow(t, file(t, plan(t, goApp(t), existingCfg()), ".github/workflows/deploy.yml"))
+	var script string
+	for _, s := range w.Jobs["deploy"].Steps {
+		if strings.Contains(s.Run, "scp ") {
+			script = s.Run
+		}
+	}
+	if script == "" {
+		t.Fatal("no deploy step")
+	}
+	root := t.TempDir()
+	work, home, remote := filepath.Join(root, "work"), filepath.Join(root, "home"), filepath.Join(root, "remote")
+	for _, d := range []string{filepath.Join(work, "deploy"), home, filepath.Join(remote, "apps", "widget")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, content := range map[string]string{
+		filepath.Join(work, "deploy", "compose.yaml"):            "c",
+		filepath.Join(work, ".env"):                              "A='b'\n",
+		filepath.Join(remote, "apps", "widget", ".vauban-owner"): owner + "\n",
+	} {
+		if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scpLog := filepath.Join(root, "scp.log")
+	bin := fakeBins(t, map[string]string{
+		"ssh":    "for last; do :; done\ncd \"$REMOTE_HOME\" && HOME=\"$REMOTE_HOME\" exec bash -c \"$last\"\n",
+		"scp":    "printf '%s\\n' \"$@\" > \"$SCP_LOG\"\n: > \"$REMOTE_HOME/apps/widget/.env\"\n",
+		"docker": "cat >/dev/null || true\n",
+	})
+	out, err := runScript(t, work, script, append([]string{
+		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + home, "REMOTE_HOME=" + remote, "SCP_LOG=" + scpLog,
+		"DEPLOY_PORT=22", "DEPLOY_SSH_KEY=K", "DEPLOY_KNOWN_HOSTS=h ssh-ed25519 AAAA",
+		"GHCR_TOKEN=t", "GITHUB_ACTOR=a", "IMAGE_TAG=abc", "APP_PORT=8080",
+	}, env...)...)
+	b, _ := os.ReadFile(scpLog)
+	return out, string(b), err
+}
+
+func TestExistingDeployOwnerCaseInsensitive(t *testing.T) {
+	for _, tc := range []struct{ owner, repo string }{
+		{"acme/widget", "Acme/Widget"},
+		{"Acme/Widget", "acme/widget"},
+	} {
+		if out, _, err := existingDeployRun(t, tc.owner, "REPO="+tc.repo, "DEPLOY_HOST=203.0.113.7"); err != nil {
+			t.Errorf("owner %s, repo %s: %v\n%s", tc.owner, tc.repo, err, out)
+		}
+	}
+	out, _, err := existingDeployRun(t, "acme/other", "REPO=acme/widget", "DEPLOY_HOST=203.0.113.7")
+	if err == nil || !strings.Contains(out, "belongs to another repository") {
+		t.Fatalf("another owner must stop the deploy: %v\n%s", err, out)
+	}
+}
+
+// scp needs an IPv6 host in brackets (ssh takes it bare).
+func TestExistingDeployIPv6Target(t *testing.T) {
+	for host, want := range map[string]string{
+		"2001:db8::1":     "deploy@[2001:db8::1]:apps/widget/",
+		"203.0.113.7":     "deploy@203.0.113.7:apps/widget/",
+		"srv.example.com": "deploy@srv.example.com:apps/widget/",
+	} {
+		out, scp, err := existingDeployRun(t, "acme/widget", "REPO=acme/widget", "DEPLOY_HOST="+host)
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", host, err, out)
+		}
+		lines := strings.Split(strings.TrimSpace(scp), "\n")
+		if got := lines[len(lines)-1]; got != want {
+			t.Errorf("%s: scp target %q, want %q", host, got, want)
+		}
+	}
+}

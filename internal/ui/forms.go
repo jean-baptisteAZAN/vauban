@@ -31,12 +31,15 @@ type Sources struct {
 	Regions       func(ctx context.Context, cloud string) ([]Choice, error)
 	Sizes         func(ctx context.Context, cloud, region string) ([]Choice, error)
 	DefaultPort   int
+	// SSHKeys lists the private keys offered for an existing server.
+	SSHKeys func() ([]Choice, error)
 }
 
 const lookupTimeout = 20 * time.Second
 
-// AskConfig asks for cloud, region, size, domain and port, starting from
-// existing (which may be nil), and returns the resulting config.
+// AskConfig asks where the app runs (a new VM or an existing server), then
+// cloud, region, size, domain and port (or the server's SSH details), starting
+// from existing (which may be nil), and returns the resulting config.
 func AskConfig(p *detect.Project, existing *config.Config, src Sources) (*config.Config, error) {
 	c := config.Config{}
 	if existing != nil {
@@ -46,6 +49,25 @@ func AskConfig(p *detect.Project, existing *config.Config, src Sources) (*config
 		c.Project = p.Name
 	}
 	prevCloud := c.Cloud
+
+	target := config.TargetCloud
+	if c.Existing() {
+		target = config.TargetExisting
+	}
+	targets := targetChoices()
+	targetOpts := make([]huh.Option[string], 0, len(targets))
+	for _, ch := range targets {
+		targetOpts = append(targetOpts, huh.NewOption(ch.Label, ch.ID))
+	}
+	if err := RunForm(context.Background(), func() string { return Answer("Where does it run?", choiceLabel(targets, target, cloudLabel)) },
+		huh.NewSelect[string]().Title("Where does it run?").Options(targetOpts...).Value(&target),
+	); err != nil {
+		return nil, err
+	}
+	if target == config.TargetExisting {
+		return askExisting(c, src)
+	}
+	c.Target, c.Server = "", nil
 
 	if c.Cloud == "" && len(src.Clouds) > 0 {
 		c.Cloud = src.Clouds[0].ID
@@ -276,4 +298,109 @@ func shortError(err error) string {
 		s = strings.ToValidUTF8(s[:117], "") + "…"
 	}
 	return s
+}
+
+// targetChoices are the answers to "Where does it run?".
+func targetChoices() []Choice {
+	return []Choice{
+		{ID: config.TargetCloud, Label: "Create a new VM"},
+		{ID: config.TargetExisting, Label: "Use an existing server"},
+	}
+}
+
+// defaultSSHUser is the local user name, the usual login on a fresh server.
+func defaultSSHUser() string { return os.Getenv("USER") }
+
+// validateDomain applies the config rule to a required domain.
+func validateDomain(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return errors.New("a domain is required for an existing server")
+	}
+	if !config.ValidHostname(s) {
+		return fmt.Errorf("%q is not a valid hostname (e.g. app.example.com)", s)
+	}
+	return nil
+}
+
+// agentKey is the SSH key choice for the ssh-agent.
+const agentKey = "agent"
+
+// askExisting asks the SSH details, domain and app port of an existing server.
+func askExisting(c config.Config, src Sources) (*config.Config, error) {
+	c.Target = config.TargetExisting
+	c.Cloud, c.Region, c.Size = "", "", ""
+	s := config.Server{}
+	if c.Server != nil {
+		s = *c.Server
+	}
+	if s.User == "" {
+		s.User = defaultSSHUser()
+	}
+	port := strconv.Itoa(s.SSHPort())
+	notEmpty := func(name string, ok func(string) bool) func(string) error {
+		return func(v string) error {
+			if v = strings.TrimSpace(v); v == "" || !ok(v) {
+				return fmt.Errorf("%s is required and must be valid", name)
+			}
+			return nil
+		}
+	}
+	summary := func() string {
+		return Answer("Host", strings.TrimSpace(s.Host)) + "\n" + Answer("SSH port", strings.TrimSpace(port)) + "\n" +
+			Answer("SSH user", strings.TrimSpace(s.User)) + "\n"
+	}
+	if err := RunForm(context.Background(), summary,
+		huh.NewInput().Title("Host").Description("IP address or hostname of the server").Value(&s.Host).
+			Validate(notEmpty("host", config.ValidServerHost)),
+		huh.NewInput().Title("SSH port").Value(&port).Validate(func(v string) error { _, err := ParsePort(v); return err }),
+		huh.NewInput().Title("SSH user").Description("needs passwordless sudo to install Docker; not needed on a ready server").
+			Value(&s.User).Validate(notEmpty("user", config.ValidUser)),
+	); err != nil {
+		return nil, err
+	}
+	var err error
+	s.Host, s.User = strings.TrimSpace(s.Host), strings.TrimSpace(s.User)
+	if s.Port, err = ParsePort(port); err != nil {
+		return nil, err
+	}
+	if s.Port == 22 {
+		s.Port = 0
+	}
+
+	var keys []Choice
+	var keysErr error
+	if src.SSHKeys != nil {
+		keys, keysErr = src.SSHKeys()
+	} else {
+		keysErr = errors.New("no key lister")
+	}
+	if keysErr == nil {
+		keys = append(keys, Choice{ID: agentKey, Label: "ssh-agent"})
+	}
+	if err := pick("SSH key", keys, keysErr, &s.Key); err != nil {
+		return nil, err
+	}
+	c.Server = &s
+
+	if c.AppPort == 0 {
+		c.AppPort = src.DefaultPort
+	}
+	appPort := strconv.Itoa(c.AppPort)
+	answers := func() string {
+		return Answer("Domain", strings.TrimSpace(c.Domain)) + "\n" + Answer("App port", strings.TrimSpace(appPort)) + "\n"
+	}
+	if err := RunForm(context.Background(), answers,
+		huh.NewInput().Title("Domain").Description("must point to the server; Caddy gets its certificate for it").
+			Value(&c.Domain).Validate(validateDomain),
+		huh.NewInput().Title("App port").Description("the port your app listens on in the container").
+			Value(&appPort).Validate(func(v string) error { _, err := ParsePort(v); return err }),
+	); err != nil {
+		return nil, err
+	}
+	c.Domain = strings.TrimSpace(c.Domain)
+	if c.AppPort, err = ParsePort(appPort); err != nil {
+		return nil, err
+	}
+	return &c, nil
 }

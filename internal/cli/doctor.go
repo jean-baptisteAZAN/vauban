@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jean-baptisteAZAN/vauban/internal/config"
 	"github.com/jean-baptisteAZAN/vauban/internal/detect"
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 	"github.com/jean-baptisteAZAN/vauban/internal/module"
@@ -28,7 +29,8 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	writeDoctor(cmd.OutOrStdout(), p, module.All(), tools.Check())
+	c, _ := config.Load(dir) // no (or unreadable) vauban.yaml: report everything
+	writeDoctorFor(cmd.OutOrStdout(), p, c, module.All(), tools.Check())
 	return nil
 }
 
@@ -42,7 +44,9 @@ func markFor(s engine.Status) string {
 	return "missing"
 }
 
-func writeDoctor(w io.Writer, p *detect.Project, mods []engine.Module, ts []tools.Tool) {
+// writeDoctorFor writes the report with the project's config (nil when there
+// is none): it shows the target and hides the module the other target never uses.
+func writeDoctorFor(w io.Writer, p *detect.Project, c *config.Config, mods []engine.Module, ts []tools.Tool) {
 	ui.Heading(w, p.Name)
 
 	stack := "unknown"
@@ -60,8 +64,15 @@ func writeDoctor(w io.Writer, p *detect.Project, mods []engine.Module, ts []tool
 	}
 	ui.Row(w, "github", gh)
 
+	if c != nil && c.Existing() && c.Server != nil {
+		ui.Row(w, "target", "existing ("+c.Server.User+"@"+c.Server.Host+")")
+	}
+
 	var parts []string
 	for _, m := range mods {
+		if c != nil && ((m.ID() == "server") != c.Existing()) && (m.ID() == "server" || m.ID() == "infra") {
+			continue
+		}
 		parts = append(parts, ui.Mark(markFor(m.Detect(p)))+" "+m.ID())
 	}
 	if len(parts) == 0 {
