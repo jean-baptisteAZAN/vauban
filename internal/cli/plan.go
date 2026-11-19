@@ -327,7 +327,7 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 	if !c.Existing() { // no infra module, no infra fingerprint
 		pl.infraStale = infra.StaleSteps(root, pl.st, c)
 	}
-	stale := slices.Concat(pl.infraStale, deploy.StaleSteps(pl.st, c))
+	stale := slices.Concat(pl.infraStale, deploy.StaleSteps(pl.st, c), deploy.KnownHostsStale(root, pl.st, c))
 	if len(pl.infraStale) > 0 {
 		// The server may be replaced: re-read its IP after infra:output.
 		stale = append(stale, deploy.ServerSteps()...)

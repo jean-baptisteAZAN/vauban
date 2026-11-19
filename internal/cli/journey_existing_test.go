@@ -371,3 +371,23 @@ func TestApplyExistingStopsOnBlockers(t *testing.T) {
 		})
 	}
 }
+
+func TestExistingKnownHostsChangeResetsSecret(t *testing.T) {
+	root, f := appliedExisting(t)
+	out, err := execPlan(t, root)
+	if err != nil || !strings.Contains(out, "✓ gh secret set DEPLOY_KNOWN_HOSTS --repo acme/shop (done)") {
+		t.Fatalf("unchanged plan: %v\n%s", err, out)
+	}
+	writeFile(t, root, ".vauban/known_hosts", "203.0.113.10 ssh-ed25519 NEWKEY\n")
+	out, err = execPlan(t, root)
+	if err != nil || !strings.Contains(out, "[secret] gh secret set DEPLOY_KNOWN_HOSTS --repo acme/shop\n") {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	f.reset()
+	if out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes"); err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if got := f.secretsSet(); !slices.Equal(got, []string{"DEPLOY_KNOWN_HOSTS"}) {
+		t.Errorf("secrets set = %q", got)
+	}
+}

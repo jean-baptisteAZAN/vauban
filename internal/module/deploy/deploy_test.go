@@ -927,3 +927,48 @@ func TestExistingComposeConfigWithPlaceholders(t *testing.T) {
 		t.Errorf("config with placeholders: %v", err)
 	}
 }
+
+// A new host key (server reinstalled, line removed and pinned again) must
+// reach DEPLOY_KNOWN_HOSTS, or every deploy fails host key checking.
+func TestKnownHostsStale(t *testing.T) {
+	p := goApp(t)
+	p.Root = t.TempDir() // goApp's root is the shared fixture
+	kh := filepath.Join(p.Root, ".vauban", "known_hosts")
+	if err := os.MkdirAll(filepath.Dir(kh), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kh, []byte("h ssh-ed25519 OLD\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := existingCfg()
+	out, err := findDomainStep(t, plan(t, p, c)).Apply(context.Background(),
+		&engine.Env{Root: p.Root, In: engine.Outputs{"server_ip": "203.0.113.7", "server_port": "22"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["deployed_known_hosts"] == "" {
+		t.Fatalf("no deployed_known_hosts in %v", out)
+	}
+	st := &engine.State{Done: map[string]bool{"deploy:domain": true, "secret:DEPLOY_KNOWN_HOSTS": true}, Outputs: out}
+	if got := KnownHostsStale(p.Root, st, c); got != nil {
+		t.Fatalf("unchanged: %v", got)
+	}
+	if err := os.WriteFile(kh, []byte("h ssh-ed25519 NEW\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"deploy:domain", "secret:DEPLOY_KNOWN_HOSTS"}
+	if got := KnownHostsStale(p.Root, st, c); !reflect.DeepEqual(got, want) {
+		t.Fatalf("changed: %v", got)
+	}
+	if got := KnownHostsStale(p.Root, st, cfg()); got != nil {
+		t.Fatalf("cloud: %v", got)
+	}
+	if got := KnownHostsStale(p.Root, &engine.State{Outputs: out}, c); got != nil {
+		t.Fatalf("secret never set: %v", got)
+	}
+	// cloud domain step output is unchanged.
+	out, _ = findDomainStep(t, plan(t, goApp(t), cfg())).Apply(context.Background(), &engine.Env{In: engine.Outputs{"server_ip": "1.2.3.4"}})
+	if _, ok := out["deployed_known_hosts"]; ok {
+		t.Fatalf("cloud output %v", out)
+	}
+}

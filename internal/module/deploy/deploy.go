@@ -6,7 +6,9 @@ package deploy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,14 +107,14 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 		steps = append(steps, engine.WriteFile{Path: f.path, Content: b, Mode: 0o644})
 	}
 	steps = append(steps,
-		&domainStep{domain: c.Domain},
+		&domainStep{domain: c.Domain, knownHosts: knownHostsPath(p.Root, c)},
 		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_HOST", FromOutput: "server_ip"},
 		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_SSH_KEY", FromFile: "$deploy_key_path"},
 		engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_DOMAIN", FromOutput: "domain"},
 	)
 	if c.Existing() {
 		steps = append(steps,
-			engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_KNOWN_HOSTS", FromFile: filepath.Join(p.Root, ".vauban", "known_hosts")},
+			engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_KNOWN_HOSTS", FromFile: knownHostsPath(p.Root, c)},
 			engine.SetSecret{Repo: p.GitHubRepo, Name: "DEPLOY_PORT", FromOutput: "server_port"},
 		)
 	}
@@ -243,6 +245,38 @@ func StaleSteps(st *engine.State, c *config.Config) []string {
 	return ServerSteps()
 }
 
+// knownHostsPath is the pinned host keys DEPLOY_KNOWN_HOSTS is set from, ""
+// for a cloud target.
+func knownHostsPath(root string, c *config.Config) string {
+	if !c.Existing() {
+		return ""
+	}
+	return filepath.Join(root, ".vauban", "known_hosts")
+}
+
+// fileHash is the sha256 of a file, "" when it cannot be read.
+func fileHash(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// KnownHostsStale returns the step IDs to clear when .vauban/known_hosts no
+// longer matches what DEPLOY_KNOWN_HOSTS was set from (a host key pinned
+// again after a reinstall), or nil. deploy:domain runs again to record it.
+func KnownHostsStale(root string, st *engine.State, c *config.Config) []string {
+	if !c.Existing() || !st.Done["secret:DEPLOY_KNOWN_HOSTS"] {
+		return nil
+	}
+	if st.Outputs["deployed_known_hosts"] == fileHash(knownHostsPath(root, c)) {
+		return nil
+	}
+	return []string{domainStepID, "secret:DEPLOY_KNOWN_HOSTS"}
+}
+
 // ExistingServerSteps are ServerSteps plus the secrets only an existing
 // server has: its pinned host key and its SSH port.
 func ExistingServerSteps() []string {
@@ -269,7 +303,7 @@ func desiredDomain(configured, ip string) string {
 // known: vauban.yaml's domain, else <ip>.sslip.io. It outputs domain, and
 // deployed_ip and deployed_domain (what the deploy secrets were set for).
 // Once applied, Describe names the resolved domain.
-type domainStep struct{ domain, resolved string }
+type domainStep struct{ domain, resolved, knownHosts string }
 
 func (*domainStep) ID() string { return domainStepID }
 func (d *domainStep) Describe() string {
@@ -292,6 +326,9 @@ func (d *domainStep) Apply(_ context.Context, env *engine.Env) (engine.Outputs, 
 	out := engine.Outputs{"domain": domain, "deployed_ip": ip, "deployed_domain": domain}
 	if port := env.In["server_port"]; port != "" { // only an existing server has one
 		out["deployed_port"] = port
+	}
+	if d.knownHosts != "" {
+		out["deployed_known_hosts"] = fileHash(d.knownHosts)
 	}
 	return out, nil
 }
