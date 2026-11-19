@@ -232,10 +232,21 @@ func StaleSteps(st *engine.State, c *config.Config) []string {
 	if deployedDomain != "" && ip != "" {
 		domainChanged = desiredDomain(c.Domain, ip) != deployedDomain
 	}
-	if !ipChanged && !domainChanged {
+	port, deployedPort := st.Outputs["server_port"], st.Outputs["deployed_port"]
+	portChanged := c.Existing() && port != "" && deployedPort != "" && port != deployedPort
+	if !ipChanged && !domainChanged && !portChanged {
 		return nil
 	}
+	if c.Existing() {
+		return ExistingServerSteps()
+	}
 	return ServerSteps()
+}
+
+// ExistingServerSteps are ServerSteps plus the secrets only an existing
+// server has: its pinned host key and its SSH port.
+func ExistingServerSteps() []string {
+	return append(ServerSteps(), "secret:DEPLOY_KNOWN_HOSTS", "secret:DEPLOY_PORT")
 }
 
 // ServerSteps are the step IDs that depend on the server IP: the domain and
@@ -278,5 +289,9 @@ func (d *domainStep) Apply(_ context.Context, env *engine.Env) (engine.Outputs, 
 	}
 	domain := desiredDomain(d.domain, ip)
 	d.resolved = domain
-	return engine.Outputs{"domain": domain, "deployed_ip": ip, "deployed_domain": domain}, nil
+	out := engine.Outputs{"domain": domain, "deployed_ip": ip, "deployed_domain": domain}
+	if port := env.In["server_port"]; port != "" { // only an existing server has one
+		out["deployed_port"] = port
+	}
+	return out, nil
 }

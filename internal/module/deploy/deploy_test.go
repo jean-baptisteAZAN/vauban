@@ -857,3 +857,41 @@ func TestExistingKnownHostsSecretOnStdin(t *testing.T) {
 		t.Errorf("secrets = %q", got)
 	}
 }
+
+func TestStaleStepsExisting(t *testing.T) {
+	want := []string{"deploy:domain", "secret:DEPLOY_HOST", "secret:DEPLOY_DOMAIN", "secret:DEPLOY_KNOWN_HOSTS", "secret:DEPLOY_PORT"}
+	deployed := engine.Outputs{"server_ip": "1.2.3.4", "deployed_ip": "1.2.3.4", "deployed_domain": "app.example.com", "server_port": "22", "deployed_port": "22"}
+	c := cfg()
+	c.Target, c.Domain = config.TargetExisting, "app.example.com"
+	if got := StaleSteps(&engine.State{Outputs: deployed}, c); got != nil {
+		t.Errorf("no change: got %v", got)
+	}
+	for name, kv := range map[string][2]string{"port": {"server_port", "2222"}, "host": {"server_ip", "5.6.7.8"}} {
+		o := engine.Outputs{}
+		for k, v := range deployed {
+			o[k] = v
+		}
+		o[kv[0]] = kv[1]
+		if got := StaleSteps(&engine.State{Outputs: o}, c); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s changed: got %v, want %v", name, got, want)
+		}
+	}
+	// A cloud project never tracks a port.
+	c.Target = ""
+	o := engine.Outputs{"server_ip": "1.2.3.4", "deployed_ip": "1.2.3.4", "deployed_domain": "app.example.com", "server_port": "2222", "deployed_port": "22"}
+	if got := StaleSteps(&engine.State{Outputs: o}, c); got != nil {
+		t.Errorf("cloud: got %v", got)
+	}
+}
+
+func TestDomainStepOutputsPort(t *testing.T) {
+	d := &domainStep{domain: "app.example.com"}
+	out, err := d.Apply(context.Background(), &engine.Env{In: engine.Outputs{"server_ip": "1.2.3.4", "server_port": "2222"}})
+	if err != nil || out["deployed_port"] != "2222" {
+		t.Errorf("out = %v, err = %v", out, err)
+	}
+	out, _ = d.Apply(context.Background(), &engine.Env{In: engine.Outputs{"server_ip": "1.2.3.4"}})
+	if _, ok := out["deployed_port"]; ok {
+		t.Errorf("cloud out has deployed_port: %v", out)
+	}
+}

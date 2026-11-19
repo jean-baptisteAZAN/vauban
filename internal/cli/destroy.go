@@ -44,6 +44,7 @@ func newDestroyCmd() *cobra.Command {
 		RunE: abortable(runDestroy),
 	}
 	cmd.Flags().String("confirm", "", "the project name, to confirm without a terminal")
+	cmd.Flags().Bool("purge", false, "existing server: also delete the project's Docker volumes (data is lost)")
 	return cmd
 }
 
@@ -61,6 +62,10 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	purge, _ := f.GetBool("purge")
+	if purge && !c.Existing() {
+		return &ExitError{Code: 2, Err: errors.New("--purge needs target: existing in vauban.yaml")}
+	}
 	st, err := engine.LoadState(root)
 	if err != nil {
 		return err
@@ -68,6 +73,9 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	p, err := detect.Scan(root)
 	if err != nil {
 		return err
+	}
+	if c.Existing() {
+		return runDestroyExisting(cmd, root, c, st, p, purge)
 	}
 	managed := infra.IsManaged(root)
 	// The cloud the infra was applied on, which vauban.yaml may no longer name.
@@ -165,22 +173,9 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 
 	var failed []string
 	if p.GitHubRepo != "" {
-		for _, s := range deploySecrets {
-			if ctx.Err() != nil {
-				return interrupted(ctx.Err())
-			}
-			desc := "gh secret delete " + s + " --repo " + p.GitHubRepo
-			prog.Update(s, desc, engine.PhaseStart, nil)
-			_, err := run.Run(ctx, engine.Cmd{Dir: root, Name: "gh", Args: []string{"secret", "delete", s, "--repo", p.GitHubRepo}})
-			switch {
-			case err == nil:
-				prog.Update(s, desc, engine.PhaseDone, nil)
-			case secretNotFound(err):
-				prog.Update(s, desc+" (not set)", engine.PhaseSkip, nil)
-			default:
-				prog.Update(s, desc, engine.PhaseFail, err)
-				failed = append(failed, s+": "+err.Error())
-			}
+		var cut bool
+		if failed, cut = deleteSecrets(ctx, prog, run, root, p.GitHubRepo, deploySecrets); cut {
+			return interrupted(ctx.Err())
 		}
 	}
 	prog.Pause()
@@ -198,6 +193,30 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 		return &ExitError{Code: 1, Err: fmt.Errorf("could not delete secrets: %s", strings.Join(failed, "; "))}
 	}
 	return nil
+}
+
+// deleteSecrets deletes the named secrets of repo and returns the failures
+// ("NAME: error"). A secret that is not set counts as deleted. cut is true
+// when ctx ended before every secret was handled.
+func deleteSecrets(ctx context.Context, prog *ui.Progress, run engine.Runner, root, repo string, names []string) (failed []string, cut bool) {
+	for _, s := range names {
+		if ctx.Err() != nil {
+			return failed, true
+		}
+		desc := "gh secret delete " + s + " --repo " + repo
+		prog.Update(s, desc, engine.PhaseStart, nil)
+		_, err := run.Run(ctx, engine.Cmd{Dir: root, Name: "gh", Args: []string{"secret", "delete", s, "--repo", repo}})
+		switch {
+		case err == nil:
+			prog.Update(s, desc, engine.PhaseDone, nil)
+		case secretNotFound(err):
+			prog.Update(s, desc+" (not set)", engine.PhaseSkip, nil)
+		default:
+			prog.Update(s, desc, engine.PhaseFail, err)
+			failed = append(failed, s+": "+err.Error())
+		}
+	}
+	return failed, false
 }
 
 // secretNotFound reports whether gh failed because the secret does not

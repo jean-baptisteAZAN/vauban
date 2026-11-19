@@ -356,3 +356,16 @@ func TestDetectPresent(t *testing.T) {
 		t.Error("detect must not report missing")
 	}
 }
+
+func TestDestroyScriptShape(t *testing.T) {
+	s := DestroyScript()
+	for _, bad := range []string{"network rm", "userdel", "apt-get", "docker stop", "docker rm ", "docker restart"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("destroy script contains %q", bad)
+		}
+	}
+	down, dir, keys := strings.Index(s, "down -v"), strings.Index(s, `rm -rf -- "$dir"`), strings.LastIndex(s, "authorized_keys")
+	if down < 0 || dir < down || keys < dir {
+		t.Errorf("order wrong: down %d, rm dir %d, authorized_keys %d", down, dir, keys)
+	}
+}

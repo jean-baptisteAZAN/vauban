@@ -40,6 +40,13 @@ var projectScript string
 //go:embed scripts/site.sh
 var siteScript string
 
+//go:embed scripts/destroy.sh
+var destroyScript string
+
+// DestroyScript is the script that removes one project from an existing
+// server (see scripts/destroy.sh for its arguments and exit codes).
+func DestroyScript() string { return destroyScript }
+
 // Module implements engine.Module for an existing server.
 type Module struct{}
 
