@@ -151,3 +151,9 @@ func TestAuditCloudConfig(t *testing.T) {
 		t.Fatal("must not ssh")
 	}
 }
+
+func TestAuditWithoutConfigPointsToPlan(t *testing.T) {
+	root := t.TempDir()
+	out, err := execVauban(t, context.Background(), "audit", "--dir", root)
+	wantExit(t, err, 2, "no vauban.yaml in "+root+`: run vauban plan and choose "Use an existing server" first`, out)
+}
