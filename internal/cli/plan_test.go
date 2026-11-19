@@ -558,11 +558,12 @@ func TestPlanInfraSectionRendering(t *testing.T) {
 		"  $ tofu -chdir=infra apply -input=false tfplan\n" +
 		"  $ tofu -chdir=infra output -json\n" +
 		"\ndeploy\n" +
+		"  + check deploy files match the target\n" +
 		"  + write deploy/compose.yaml\n" +
 		"  + write deploy/Caddyfile\n" +
 		"  + write .github/workflows/deploy.yml\n" +
 		"  + deploy domain: sslip.io domain\n"
-	for _, w := range []string{want, "\n10 to write · 5 to run · 3 secrets · 1 other\n"} {
+	for _, w := range []string{want, "\n10 to write · 5 to run · 3 secrets · 2 other\n"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("rendering changed; want\n%s\nin:\n%s", w, out)
 		}
