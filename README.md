@@ -209,7 +209,7 @@ Or pass `--target existing --host <ip> --ssh-user <user> --ssh-key <path|agent> 
 vauban audit
 ```
 
-`audit` is read-only: it runs a script over SSH that writes nothing. It uses `sudo -n` only to read: `sudo -n true`, `sudo -n sshd -T`, and, when your user is not in the `docker` group, read-only `sudo -n docker` queries (version, compose version, network ls, ps, inspect, and reading or testing files inside the Caddy container). It reports the OS, sudo, Docker and Compose, the `deploy` user, the ports 80/443, any Caddy found, the firewall, SSH password login, free disk and pending updates, and says what `apply` would do or why it would stop. `plan` and `apply` run the same audit first and stop before any change if it finds a blocker. The first connection pins the host key in `.vauban/known_hosts`; if it later changes, vauban stops and tells you to remove the line yourself if the change is expected.
+`audit` is read-only: it runs a script over SSH that writes nothing. It uses `sudo -n` only to read: `sudo -n true`, `sudo -n sshd -T`, and, when your user is not in the `docker` group, read-only `sudo -n docker` queries (version, compose version, network ls, ps, inspect, and reading or testing files inside the Caddy container). It reports the OS, sudo, Docker and Compose, the `deploy` user, the ports 80/443, any Caddy found, the firewall, SSH password login, free disk and pending updates, and says what `apply` would do or why it would stop. `plan` and `apply` run the same audit first (`apply` shows it before asking) and stop before any change if it finds a blocker. The first connection to a host and port pins its key in `.vauban/known_hosts`; if it later changes, vauban stops and tells you to remove the line yourself if the change is expected. The next `apply` then sets `DEPLOY_KNOWN_HOSTS` again with the new key. `plan` warns when `host` is neither an IP address nor a public DNS name (an `~/.ssh/config` alias or a LAN name): GitHub Actions deploys to that name and must be able to resolve it.
 
 ### What `apply` installs, and what it needs
 
@@ -224,7 +224,7 @@ vauban audit
 
 If everything that is missing needs `sudo` and your user has none, `apply` stops and says what to install by hand. On a server that is already fully set up, `apply` works without `sudo` when you connect as `deploy`. Only Debian and Ubuntu (`ID` or `ID_LIKE` containing `debian`) are supported for installs.
 
-`deploy` is in the `docker` group, which is root-equivalent on that machine. There is one `deploy` user per server, shared by every vauban project on it.
+`deploy` is in the `docker` group, which is root-equivalent on that machine. There is one `deploy` user per server, shared by every vauban project on it, so every project's `DEPLOY_SSH_KEY` is root-equivalent on the shared host: whoever can run that repo's deploy workflow can read the other projects' `.env` files and stop or replace their containers. Apps on the `vauban` network can also reach each other directly. Only put projects you trust equally on one server.
 
 ### Caddy
 
@@ -236,18 +236,20 @@ If everything that is missing needs `sudo` and your user has none, `apply` stops
   }
   ```
 
-- You already run Caddy in a container: vauban never edits, restarts or recreates it. It is used as is when (a) a host directory is mounted at `/etc/caddy/sites`, (b) its Caddyfile contains `import /etc/caddy/sites/*.caddy`, and (c) it is attached to the Docker network `vauban`. Otherwise `audit` and `apply` stop before changing anything and print the one-time change to make (the `import` line, the `sites` mount, the network, then `docker compose up -d`). Run `apply` again afterwards.
+- You already run Caddy in a container: vauban never edits, restarts or recreates it. It is used as is when (a) a host directory is mounted at `/etc/caddy/sites`, (b) its Caddyfile contains `import /etc/caddy/sites/*.caddy`, and (c) it is attached to the Docker network `vauban`. Otherwise `audit` and `apply` stop before changing anything and print the one-time change to make (the `import` line, the `sites` mount and its directory, adding `vauban` to the service's existing networks, then `docker compose up -d`). Run `apply` again afterwards.
 - Something else holds 80/443: `apply` stops.
 
 Each site is written, checked with `caddy validate` and applied with `caddy reload` inside the container; if validation fails the file is removed or restored and nothing is reloaded. A site file vauban did not write is never overwritten or removed.
 
 ### Several projects on one server
 
-Each project gets `~deploy/apps/<project>/`, and the file `.vauban-owner` in it holds the GitHub repo (`owner/name`) that created it. `apply` and `destroy` refuse to touch a directory owned by another repo, or one with no marker, so two repos cannot take over each other's project name. The app is reachable by Caddy as `<project>-app:<app_port>` on the `vauban` network and publishes no port. The GitHub secrets set are `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_DOMAIN`, `DEPLOY_KNOWN_HOSTS` and `DEPLOY_PORT`. Generated deploy files for this mode start with `# Generated by vauban (target: existing)`; vauban will not overwrite files generated for the other mode unless you pass `--force`. Switching `target` between `cloud` and `existing` once infra is applied is refused.
+Each project gets `~deploy/apps/<project>/`, and the file `.vauban-owner` in it holds the GitHub repo (`owner/name`, lowercased; compared ignoring case, like GitHub) that created it. `apply` and `destroy` refuse to touch a directory owned by another repo, or one with no marker, so two repos cannot take over each other's project name. The app is reachable by Caddy as `<project>-app:<app_port>` on the `vauban` network and publishes no port. The GitHub secrets set are `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_DOMAIN`, `DEPLOY_KNOWN_HOSTS` and `DEPLOY_PORT`. Generated deploy files for this mode start with `# Generated by vauban (target: existing)`; vauban will not overwrite files generated for the other mode unless you pass `--force`. Switching `target` from `cloud` to `existing` once infra is applied is refused, and so is switching from `existing` to `cloud` once any server step has run. Moving a deployed project to another server (a new `host`, `port` or `user`) is refused too: run `vauban destroy` first, then `apply`. A refused change is never saved to `vauban.yaml`.
+
+A new `domain` or `app_port` is applied in place: the next `apply` rewrites the project's site file (the same `<project>.caddy`, so the old domain's site is gone), reloads Caddy and sets the deploy secrets again (`plan` lists those steps as pending). A new `app_port` also changes the generated deploy files, which needs `apply --force` as described above; push to redeploy.
 
 ### Destroy on your own server
 
-`vauban destroy` runs `docker compose down` for the project, removes its site file (only if vauban wrote it) and reloads Caddy, removes `~deploy/apps/<project>/` (only if the owner marker matches this repo), and last the project's `# vauban:<project>` key line. It deletes the five GitHub secrets and `.vauban/state.json`, and keeps `.vauban/known_hosts`. Docker volumes are kept; `vauban destroy --purge` also deletes them (the plan lists them, and their data is lost).
+`vauban destroy` runs `docker compose down` for the project, removes its site file (only if vauban wrote it) and reloads Caddy, removes `~deploy/apps/<project>/` (only if the owner marker matches this repo), and last the project's `# vauban:<project>` key line. It deletes the five GitHub secrets and `.vauban/state.json`, and keeps `.vauban/known_hosts`. It always acts on the server the project was applied on (recorded in `.vauban/state.json`), even if `vauban.yaml` now names another one. Docker volumes are kept; `vauban destroy --purge` also deletes them (the plan lists them, and their data is lost).
 
 ### What is never touched
 
@@ -266,7 +268,7 @@ Runs `tofu destroy`, deletes the deploy secrets and forgets vauban's state. Gene
 
 - OpenTofu state is local (`infra/terraform.tfstate`, gitignored). **Back it up**: losing it orphans your VM. Remote state is planned.
 - cloud-init only runs on first boot: changing it does not reach an existing VM. Recreate the VM to apply it.
-- Changing cloud means `vauban destroy` first.
+- Changing cloud, or moving a project to another server, means `vauban destroy` first.
 - Node apps start with `npm start`.
 - GitHub Actions and GHCR only; macOS and Linux only; one service per repo.
 
