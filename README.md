@@ -31,6 +31,7 @@ vauban is a fast, single-binary Go CLI. It looks at your repository (Go, Node/Ty
 - [Supported clouds and stacks](#supported-clouds-and-stacks)
 - [Security defaults](#security-defaults)
 - [Safety and exit codes](#safety-and-exit-codes)
+- [Use your own server](#use-your-own-server)
 - [Destroy](#destroy)
 - [Known limitations](#known-limitations)
 - [Performance](#performance)
@@ -182,6 +183,75 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 | 2 | Usage problem: `apply` without a terminal and without `--yes`, or with a mismatched `--confirm`; `destroy` without a terminal and without `--confirm <project>` (or a mismatched name); `plan` with no `vauban.yaml` and no `--cloud` outside a terminal |
 | 3 | Destructive infra change not confirmed (nothing was applied): rerun and type the project name, or pass `--confirm <project>` |
 | 130 | Interrupted (Ctrl-C); state is kept, rerun to resume |
+
+## Use your own server
+
+Already have a Debian or Ubuntu machine? Point vauban at it instead of creating a VM:
+
+```yaml
+# vauban.yaml
+project: shop
+target: existing
+domain: shop.example.com     # required in this mode
+app_port: 8080
+server:
+  host: 203.0.113.10         # IP or hostname
+  port: 22                   # optional, default 22
+  user: ops                  # the SSH user vauban connects as
+  key: ~/.ssh/id_ed25519     # a private key path, or the literal "agent"
+```
+
+Or pass `--target existing --host <ip> --ssh-user <user> --ssh-key <path|agent> [--ssh-port <n>]` to `vauban plan`. `cloud`, `region` and `size` must stay empty in this mode.
+
+### Audit first
+
+```sh
+vauban audit
+```
+
+`audit` is read-only: it runs a script over SSH that writes nothing and only calls `sudo -n true` and `sudo -n sshd -T` as sudo. It reports the OS, sudo, Docker and Compose, the `deploy` user, the ports 80/443, any Caddy found, the firewall, SSH password login, free disk and pending updates, and says what `apply` would do or why it would stop. `plan` and `apply` run the same audit first and stop before any change if it finds a blocker. The first connection pins the host key in `.vauban/known_hosts`; if it later changes, vauban stops and tells you to remove the line yourself if the change is expected.
+
+### What `apply` installs, and what it needs
+
+| What | When | Needs |
+|---|---|---|
+| Docker Engine + Compose plugin | only if missing (Compose alone if only Compose is missing) | passwordless `sudo` |
+| User `deploy`, in the `docker` group, no sudo | only if missing | passwordless `sudo` |
+| The project's deploy key in `~deploy/.ssh/authorized_keys`, as a line ending ` # vauban:<project>` | each project | `sudo`, or connecting as `deploy` |
+| Docker network `vauban` | if missing | `sudo`, or an SSH user in the `docker` group, or `deploy` |
+| `vauban-caddy` (`caddy:2`, `restart: unless-stopped`) in `/opt/vauban/caddy` | only when nothing listens on 80/443 | passwordless `sudo` |
+| `~deploy/apps/<project>/` with an owner marker, and `<sites dir>/<project>.caddy` | each project | `sudo`, or connecting as `deploy` |
+
+If everything that is missing needs `sudo` and your user has none, `apply` stops and says what to install by hand. On a server that is already fully set up, `apply` works without `sudo` when you connect as `deploy`. Only Debian and Ubuntu (`ID` or `ID_LIKE` containing `debian`) are supported for installs.
+
+`deploy` is in the `docker` group, which is root-equivalent on that machine. There is one `deploy` user per server, shared by every vauban project on it.
+
+### Caddy
+
+- Nothing on 80/443: vauban installs its own Caddy in `/opt/vauban/caddy`. Its Caddyfile is exactly `import /etc/caddy/sites/*.caddy`, and each project adds one file to `sites/`:
+
+  ```
+  shop.example.com {
+  	reverse_proxy shop-app:8080
+  }
+  ```
+
+- You already run Caddy in a container: vauban never edits, restarts or recreates it. It is used as is when (a) a host directory is mounted at `/etc/caddy/sites`, (b) its Caddyfile contains `import /etc/caddy/sites/*.caddy`, and (c) it is attached to the Docker network `vauban`. Otherwise `audit` and `apply` stop before changing anything and print the one-time change to make (the `import` line, the `sites` mount, the network, then `docker compose up -d`). Run `apply` again afterwards.
+- Something else holds 80/443: `apply` stops.
+
+Each site is written, checked with `caddy validate` and applied with `caddy reload` inside the container; if validation fails the file is removed or restored and nothing is reloaded. A site file vauban did not write is never overwritten or removed.
+
+### Several projects on one server
+
+Each project gets `~deploy/apps/<project>/`, and the file `.vauban-owner` in it holds the GitHub repo (`owner/name`) that created it. `apply` and `destroy` refuse to touch a directory owned by another repo, or one with no marker, so two repos cannot take over each other's project name. The app is reachable by Caddy as `<project>-app:<app_port>` on the `vauban` network and publishes no port. The GitHub secrets set are `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_DOMAIN`, `DEPLOY_KNOWN_HOSTS` and `DEPLOY_PORT`. Generated deploy files for this mode start with `# Generated by vauban (target: existing)`; vauban will not overwrite files generated for the other mode unless you pass `--force`. Switching `target` between `cloud` and `existing` once infra is applied is refused.
+
+### Destroy on your own server
+
+`vauban destroy` runs `docker compose down` for the project, removes its site file (only if vauban wrote it) and reloads Caddy, removes `~deploy/apps/<project>/` (only if the owner marker matches this repo), and last the project's `# vauban:<project>` key line. It deletes the five GitHub secrets and `.vauban/state.json`, and keeps `.vauban/known_hosts`. Docker volumes are kept; `vauban destroy --purge` also deletes them (the plan lists them, and their data is lost).
+
+### What is never touched
+
+Docker itself once installed, Caddy, the `vauban` network, the `deploy` user and other projects are never removed by `destroy`. vauban never changes your firewall, `sshd_config`, SSH password login, updates, other containers, or a Caddy you run yourself. It does not harden the machine: `audit` reports firewall and password-login findings and leaves them to you.
 
 ## Destroy
 
