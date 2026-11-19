@@ -59,8 +59,10 @@ deploy_home=""
 if id deploy >/dev/null 2>&1; then
 	emit deploy_user yes
 	deploy_home=$(getent passwd deploy 2>/dev/null | cut -d: -f6)
+	if id -nG deploy 2>/dev/null | tr ' ' '\n' | grep -qx docker; then emit deploy_docker_group yes; else emit deploy_docker_group no; fi
 else
 	emit deploy_user no
+	emit deploy_docker_group no
 fi
 emit project "$project"
 owner=""

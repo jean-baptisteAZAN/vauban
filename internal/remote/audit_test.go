@@ -29,7 +29,13 @@ func TestParseFacts(t *testing.T) {
 		f.Firewall != "inactive" || f.SSHPasswordAuth != "yes" || f.DiskFreeGB != 40 || f.PendingUpdates != 12 {
 		t.Fatalf("%+v", f)
 	}
+	if f.DeployUser || f.DeployDockerGroup {
+		t.Fatalf("fresh: %+v", f)
+	}
 	f = fixture(t, "audit-user-caddy-ready.txt")
+	if !f.DeployUser || !f.DeployDockerGroup {
+		t.Fatalf("deploy group: %+v", f)
+	}
 	c := f.Caddy
 	if c == nil || c.Container != "caddy" || c.VaubanManaged || c.SitesHostDir != "/srv/proxy/sites" ||
 		c.CaddyfileHostPath != "/srv/proxy/Caddyfile" || !c.HasImport || !c.OnNetwork {

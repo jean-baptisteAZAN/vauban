@@ -8,6 +8,7 @@ docker_access=direct
 compose=yes
 docker_group=yes
 deploy_user=yes
+deploy_docker_group=yes
 project=shop
 project_owner=
 projects=blog

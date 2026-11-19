@@ -38,7 +38,10 @@ func (*Module) ID() string         { return "server" }
 func (*Module) Title() string      { return "server" }
 func (*Module) Requires() []string { return nil }
 
-func (*Module) Detect(*detect.Project) engine.Status { return engine.StatusMissing }
+// Detect reports present: nothing of this module lives in the repository (the
+// server is checked by vauban audit), and "missing" would make vauban doctor
+// show a failing server for cloud projects that never use this module.
+func (*Module) Detect(*detect.Project) engine.Status { return engine.StatusPresent }
 
 // Plan returns nothing for a cloud target.
 func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) {
@@ -103,17 +106,18 @@ func (a auditStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, 
 	}
 	f := au.Facts
 	return engine.Outputs{
-		"server_ip":              a.t.Host,
-		"server_port":            strconv.Itoa(a.t.Port),
-		"server_user":            a.t.User,
-		"server_caddy_mode":      CaddyModeName(au.Caddy),
-		"server_sites_dir":       au.SitesDir,
-		"server_caddy_container": au.CaddyContainer,
-		"server_sudo":            strconv.FormatBool(f.Sudo),
-		"server_docker":          strconv.FormatBool(f.Docker),
-		"server_compose":         strconv.FormatBool(f.Compose),
-		"server_deploy_user":     strconv.FormatBool(f.DeployUser),
-		"server_docker_group":    strconv.FormatBool(f.DockerGroup),
+		"server_ip":                  a.t.Host,
+		"server_port":                strconv.Itoa(a.t.Port),
+		"server_user":                a.t.User,
+		"server_caddy_mode":          CaddyModeName(au.Caddy),
+		"server_sites_dir":           au.SitesDir,
+		"server_caddy_container":     au.CaddyContainer,
+		"server_sudo":                strconv.FormatBool(f.Sudo),
+		"server_docker":              strconv.FormatBool(f.Docker),
+		"server_compose":             strconv.FormatBool(f.Compose),
+		"server_deploy_user":         strconv.FormatBool(f.DeployUser),
+		"server_docker_group":        strconv.FormatBool(f.DockerGroup),
+		"server_deploy_docker_group": strconv.FormatBool(f.DeployDockerGroup),
 	}, nil
 }
 
@@ -136,7 +140,12 @@ func (d dockerStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs,
 	if env.In["server_sudo"] != "true" {
 		return nil, needSudo("Docker Engine and the Compose plugin")
 	}
-	_, err := remote.Exec(ctx, env.Run, d.t, dockerScript)
+	// Docker already present: compose-only mode, which never touches the engine.
+	mode := "full"
+	if env.In["server_docker"] == "true" {
+		mode = "compose"
+	}
+	_, err := remote.Exec(ctx, env.Run, d.t, dockerScript, mode)
 	return nil, err
 }
 
@@ -148,7 +157,7 @@ func (d deployUserStep) Describe() string {
 }
 
 func (d deployUserStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, error) {
-	if env.In["server_deploy_user"] == "true" && env.In["server_docker_group"] == "true" {
+	if env.In["server_deploy_user"] == "true" && env.In["server_deploy_docker_group"] == "true" {
 		return nil, nil
 	}
 	if env.In["server_sudo"] != "true" {
@@ -181,12 +190,27 @@ func (a authorizeStep) Apply(ctx context.Context, env *engine.Env) (engine.Outpu
 		}
 		pub = strings.TrimSpace(string(b))
 	}
-	if pub == "" || strings.ContainsAny(pub, "\r\n") {
-		return nil, errors.New("deploy public key is empty or spans several lines")
+	if err := checkPubkey(pub); err != nil {
+		return nil, err
 	}
 	if a.t.User != "deploy" && env.In["server_sudo"] != "true" {
 		return nil, needSudo("the deploy key in ~deploy/.ssh/authorized_keys")
 	}
 	_, err := remote.Exec(ctx, env.Run, a.t, authorizeScript, pub, a.project)
 	return nil, err
+}
+
+var keyPrefixes = []string{"ssh-ed25519 ", "ssh-rsa ", "ecdsa-", "sk-"}
+
+// checkPubkey accepts exactly one public key line.
+func checkPubkey(pub string) error {
+	if pub == "" || strings.ContainsAny(pub, "\r\n") {
+		return errors.New("deploy public key is empty or spans several lines")
+	}
+	for _, p := range keyPrefixes {
+		if strings.HasPrefix(pub, p) {
+			return nil
+		}
+	}
+	return errors.New("deploy public key is not an ssh public key (ssh-ed25519, ssh-rsa, ecdsa-*, sk-*)")
 }

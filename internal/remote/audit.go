@@ -30,6 +30,7 @@ type Facts struct {
 	User, DockerAccess                                      string // ssh user; direct|sudo|denied|unavailable|absent
 	OSID, OSLike, OSPretty                                  string
 	Sudo, Docker, Compose, DockerGroup, DeployUser, Network bool
+	DeployDockerGroup                                       bool           // user deploy exists and is in the docker group
 	Ports                                                   map[int]string // port -> owner process or container, absent when free
 	Caddy                                                   *CaddyInfo
 	Firewall                                                string // none|inactive|active-open|active-closed|unknown
@@ -92,6 +93,8 @@ func ParseFacts(out []byte) (Facts, error) {
 			f.Docker = yes
 		case "compose":
 			f.Compose = yes
+		case "deploy_docker_group":
+			f.DeployDockerGroup = yes
 		case "docker_group":
 			f.DockerGroup = yes
 		case "deploy_user":

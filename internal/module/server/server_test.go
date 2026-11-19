@@ -117,7 +117,7 @@ func TestAuditOutputs(t *testing.T) {
 		"server_ip": "203.0.113.10", "server_port": "2222", "server_user": "ops",
 		"server_sites_dir": "/opt/vauban/caddy/sites", "server_caddy_container": "vauban-caddy",
 		"server_caddy_mode": "install", "server_sudo": "true", "server_docker": "false",
-		"server_compose": "false", "server_deploy_user": "false", "server_docker_group": "false",
+		"server_compose": "false", "server_deploy_user": "false", "server_docker_group": "false", "server_deploy_docker_group": "false",
 	} {
 		if out[k] != v {
 			t.Errorf("%s = %q, want %q", k, out[k], v)
@@ -190,7 +190,7 @@ func TestDeployUser(t *testing.T) {
 	steps, p := plan(t, config.TargetExisting)
 	st := byID(steps, "server:deploy-user")
 	r := &fakeRunner{}
-	in := engine.Outputs{"server_deploy_user": "true", "server_docker_group": "true"}
+	in := engine.Outputs{"server_deploy_user": "true", "server_deploy_docker_group": "true", "server_docker_group": "false"}
 	if _, err := st.Apply(context.Background(), &engine.Env{Root: p.Root, Run: r, In: in}); err != nil || len(r.cmds) != 0 {
 		t.Fatalf("noop: %v %d", err, len(r.cmds))
 	}
@@ -269,5 +269,90 @@ func TestAuthorizeKeyReadsPubFromDisk(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(r.cmds[0].Args, " "), "ssh-ed25519 ZZ vauban-shop") {
 		t.Fatal("pubkey not passed")
+	}
+}
+
+func TestDeployUserGatedOnDeployGroup(t *testing.T) {
+	steps, p := plan(t, config.TargetExisting)
+	r := &fakeRunner{}
+	// deploy exists but is not in docker; the ssh user is.
+	in := engine.Outputs{"server_sudo": "true", "server_deploy_user": "true", "server_docker_group": "true", "server_deploy_docker_group": "false"}
+	if _, err := byID(steps, "server:deploy-user").Apply(context.Background(), &engine.Env{Root: p.Root, Run: r, In: in}); err != nil || len(r.cmds) != 1 {
+		t.Fatalf("script must run: %v %d", err, len(r.cmds))
+	}
+}
+
+func dockerArgs(t *testing.T, in engine.Outputs) (*fakeRunner, error) {
+	t.Helper()
+	steps, p := plan(t, config.TargetExisting)
+	r := &fakeRunner{}
+	_, err := byID(steps, "server:docker").Apply(context.Background(), &engine.Env{Root: p.Root, Run: r, In: in})
+	return r, err
+}
+
+func TestDockerModes(t *testing.T) {
+	r, err := dockerArgs(t, engine.Outputs{"server_sudo": "true", "server_docker": "true", "server_compose": "false"})
+	if err != nil || len(r.cmds) != 1 || !strings.HasSuffix(strings.Join(r.cmds[0].Args, " "), "sh -s -- 'compose'") {
+		t.Fatalf("compose mode: %v %v", err, r.cmds)
+	}
+	r, err = dockerArgs(t, engine.Outputs{"server_sudo": "true", "server_docker": "false"})
+	if err != nil || !strings.HasSuffix(strings.Join(r.cmds[0].Args, " "), "sh -s -- 'full'") {
+		t.Fatalf("full mode: %v %v", err, r.cmds)
+	}
+}
+
+func TestDockerScriptSafety(t *testing.T) {
+	for _, w := range []string{
+		`grep -rqs download.docker.com /etc/apt/sources.list /etc/apt/sources.list.d/`,
+		`mode=compose`, `--no-upgrade docker-compose-plugin`, `docker-compose-v2`,
+		`NEEDRESTART_MODE=l`, `</dev/null`, `--no-upgrade ca-certificates curl`,
+		`if [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO="sudo -n"; fi`,
+	} {
+		if !strings.Contains(dockerScript, w) {
+			t.Errorf("docker script lacks %q", w)
+		}
+	}
+	// compose-only branch must exit before any engine package is named.
+	pre, _, _ := strings.Cut(dockerScript, "if ! has_docker_source; then\n\t# shellcheck")
+	if i := strings.Index(pre, "apt install -y docker-ce"); i >= 0 {
+		t.Error("engine install reachable from compose mode")
+	}
+	// the key and list are only written when no source exists.
+	if !strings.Contains(dockerScript, "if ! has_docker_source; then\n\t# shellcheck disable=SC1091") {
+		t.Error("key/list not guarded by the source check")
+	}
+}
+
+func TestScriptsHandleRootWithoutSudo(t *testing.T) {
+	for name, s := range map[string]string{"deploy-user": deployUserScript, "authorize-key": authorizeScript} {
+		if !strings.Contains(s, `if [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO="sudo -n"; fi`) {
+			t.Errorf("%s: no SUDO switch", name)
+		}
+	}
+	if !strings.Contains(authorizeScript, "$SUDO runuser -u deploy --") || !strings.Contains(authorizeScript, "grep -qxF -e") {
+		t.Error("authorize script: runuser / grep -e missing")
+	}
+}
+
+func TestAuthorizeKeyRejectsBadPubkeys(t *testing.T) {
+	steps, p := plan(t, config.TargetExisting)
+	for _, pub := range []string{"ssh-ed25519 A k\nssh-ed25519 B k", "not a key", "ssh-ed25519 A\rk"} {
+		r := &fakeRunner{}
+		env := &engine.Env{Root: p.Root, Run: r, In: engine.Outputs{"deploy_pubkey": pub, "server_sudo": "true"}}
+		if _, err := byID(steps, "server:authorize-key").Apply(context.Background(), env); err == nil || len(r.cmds) != 0 {
+			t.Errorf("%q accepted", pub)
+		}
+	}
+	// empty in env falls back to disk, which is absent here.
+	r := &fakeRunner{}
+	env := &engine.Env{Root: p.Root, Run: r, In: engine.Outputs{"server_sudo": "true"}}
+	if _, err := byID(steps, "server:authorize-key").Apply(context.Background(), env); err == nil || len(r.cmds) != 0 {
+		t.Error("empty pubkey accepted")
+	}
+}
+
+func TestDetectPresent(t *testing.T) {
+	if New().Detect(&detect.Project{}) != engine.StatusPresent {
+		t.Error("detect must not report missing")
 	}
 }

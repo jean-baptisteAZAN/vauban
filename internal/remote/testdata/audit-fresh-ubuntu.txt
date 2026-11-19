@@ -8,6 +8,7 @@ docker_access=absent
 compose=no
 docker_group=no
 deploy_user=no
+deploy_docker_group=no
 project=shop
 project_owner=
 projects=
