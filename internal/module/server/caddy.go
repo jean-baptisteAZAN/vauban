@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/jean-baptisteAZAN/vauban/internal/engine"
 	"github.com/jean-baptisteAZAN/vauban/internal/remote"
@@ -19,7 +20,21 @@ const ProjectsDir = "apps"
 // caddyfile is the whole vauban-managed Caddyfile: every site is a file.
 const caddyfile = "import /etc/caddy/sites/*.caddy\n"
 
-const ownerConflict = "VAUBAN_OWNER_CONFLICT "
+const (
+	ownerConflict = "VAUBAN_OWNER_CONFLICT "
+	siteForeign   = "VAUBAN_SITE_FOREIGN"
+)
+
+// clean drops control characters from remote-controlled text before it is
+// shown in an error.
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
 
 //go:embed templates/caddy-compose.yaml
 var composeTemplate string
@@ -63,7 +78,7 @@ func remoteErr(out []byte, err error, project, repo string) error {
 	}
 	for _, l := range strings.Split(string(out), "\n") {
 		if other, ok := strings.CutPrefix(strings.TrimSpace(l), strings.TrimSpace(ownerConflict)); ok {
-			other = strings.TrimSpace(other)
+			other = clean(strings.TrimSpace(other))
 			if other == "-" {
 				return fmt.Errorf("~deploy/%s/%s exists without a .vauban-owner marker, so it is not ours (%s): pick another project name or remove it by hand", ProjectsDir, project, repo)
 			}
@@ -185,17 +200,26 @@ func (s siteStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, e
 		args := append([]string{action, mode, sites, s.project, s.repo, container}, extra...)
 		return remote.Exec(ctx, env.Run, s.t, siteScript, args...)
 	}
-	if out, err := run("write", b64(RenderSite(s.project, s.domain, s.port))); err != nil {
+	content := b64(RenderSite(s.project, s.domain, s.port))
+	if out, err := run("write", content); err != nil {
+		for _, l := range strings.Split(string(out), "\n") {
+			if strings.TrimSpace(l) == siteForeign {
+				return nil, fmt.Errorf("%s/%s.caddy already exists and was not written by vauban: rename the project or remove that file by hand", sites, s.project)
+			}
+		}
 		return nil, remoteErr(out, err, s.project, s.repo)
 	}
 	if _, err := run("validate"); err != nil {
-		// Never leave a site file Caddy rejects; nothing is reloaded.
-		_, rmErr := run("remove")
-		err = fmt.Errorf("caddy rejected the site for %s, removed it, nothing reloaded:\n%w", s.domain, trimLines(err, 20))
-		if rmErr != nil {
-			err = fmt.Errorf("%w\n(removing the site file also failed: %w)", err, rmErr)
+		// Restore the previous file (or remove ours); nothing is reloaded.
+		_, rbErr := run("rollback", content)
+		err = fmt.Errorf("Caddy config invalid after adding %s: %w", s.domain, trimLines(err, 20)) //nolint:staticcheck // wording is specified
+		if rbErr != nil {
+			err = fmt.Errorf("%w\n(restoring the previous site file also failed: %w)", err, rbErr)
 		}
 		return nil, err
+	}
+	if _, err := run("commit"); err != nil {
+		return nil, fmt.Errorf("record the site file: %w", err)
 	}
 	if _, err := run("reload"); err != nil {
 		return nil, fmt.Errorf("caddy reload failed: %w", trimLines(err, 20))

@@ -17,5 +17,6 @@ if as_deploy docker network inspect vauban >/dev/null 2>&1; then
 	echo "network vauban ready"
 	exit 0
 fi
-as_deploy docker network create vauban >/dev/null
+# create first, inspect on failure: race-safe against a concurrent create.
+as_deploy docker network create vauban >/dev/null 2>&1 || as_deploy docker network inspect vauban >/dev/null
 echo "network vauban created"

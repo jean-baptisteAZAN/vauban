@@ -70,9 +70,17 @@ if [ -e "$dir" ]; then
 	exit 4
 fi
 mkdir -p "$apps"
-mkdir -m 750 "$dir"
-printf '%s\n' "$slug" >"$marker.tmp"
-chmod 644 "$marker.tmp"
-mv -f "$marker.tmp" "$marker"
+# build the dir aside, then move it into place: a crash never leaves a
+# marker-less project dir.
+new=$(mktemp -d "$apps/.vauban-new.XXXXXX")
+trap 'rm -rf "$new"' EXIT INT TERM
+printf '%s\n' "$slug" >"$new/.vauban-owner"
+chmod 644 "$new/.vauban-owner"
+chmod 750 "$new"
+if [ -e "$dir" ] || [ -L "$dir" ]; then
+	echo "VAUBAN_OWNER_CONFLICT -"
+	exit 3
+fi
+mv -T "$new" "$dir"
 echo "project dir created"
 INNER

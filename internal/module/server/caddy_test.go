@@ -101,15 +101,15 @@ func TestPlanIncludesCaddySteps(t *testing.T) {
 	}
 }
 
-func TestAuditOutputsGuide(t *testing.T) {
+func TestAuditFailsWithGuideOnUserNeedsSetup(t *testing.T) {
 	steps, p := plan(t, config.TargetExisting)
 	r := &fakeRunner{out: readFixture(t, "audit-user-caddy-baked.txt")}
-	out, err := byID(steps, "server:audit").Apply(context.Background(), &engine.Env{Root: p.Root, Run: r, In: engine.Outputs{}})
-	if err != nil {
-		t.Fatal(err)
+	_, err := byID(steps, "server:audit").Apply(context.Background(), &engine.Env{Root: p.Root, Run: r, In: engine.Outputs{}})
+	if err == nil || !strings.Contains(err.Error(), "not set up for vauban") {
+		t.Fatalf("want guide error: %v", err)
 	}
-	if out["server_caddy_mode"] != "user-needs-setup" || !strings.Contains(out["server_caddy_guide"], "not set up for vauban") {
-		t.Fatalf("guide not stored: %q %q", out["server_caddy_mode"], out["server_caddy_guide"])
+	if len(r.cmds) != 1 {
+		t.Fatalf("calls %d", len(r.cmds))
 	}
 }
 
@@ -218,7 +218,7 @@ func TestProjectCreates(t *testing.T) {
 	if !strings.HasSuffix(strings.Join(r.cmds[0].Args, " "), "sh -s -- 'sudo' 'shop' 'me/shop'") {
 		t.Fatalf("args %v", r.cmds[0].Args)
 	}
-	for _, w := range []string{"mkdir -m 750", ".vauban-owner", "-L ", "chmod 644", "runuser -u deploy --", "VAUBAN_OWNER_CONFLICT"} {
+	for _, w := range []string{"mktemp -d \"$apps/.vauban-new.XXXXXX\"", "mv -T \"$new\" \"$dir\"", "[ -e \"$dir\" ] || [ -L \"$dir\" ]", "chmod 750 \"$new\"", ".vauban-owner", "-L ", "chmod 644", "runuser -u deploy --", "VAUBAN_OWNER_CONFLICT"} {
 		if !strings.Contains(r.stdi[0], w) {
 			t.Errorf("script lacks %q", w)
 		}
@@ -262,10 +262,10 @@ func TestSiteWritesValidatesReloads(t *testing.T) {
 	if _, err := stepEnv(t, cfg(config.TargetExisting), "server:site", siteIn(), r); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.cmds) != 3 {
+	if len(r.cmds) != 4 {
 		t.Fatalf("calls %d", len(r.cmds))
 	}
-	for i, act := range []string{"'write'", "'validate'", "'reload'"} {
+	for i, act := range []string{"'write'", "'validate'", "'commit'", "'reload'"} {
 		if !strings.Contains(strings.Join(r.cmds[i].Args, " "), "sh -s -- "+act+" 'sudo' '/opt/vauban/caddy/sites' 'shop' 'me/shop' 'vauban-caddy'") {
 			t.Errorf("call %d args: %v", i, r.cmds[i].Args)
 		}
@@ -280,7 +280,7 @@ func TestSiteWritesValidatesReloads(t *testing.T) {
 			t.Error("domain/project in script text")
 		}
 	}
-	for _, w := range []string{"caddy validate --config /etc/caddy/Caddyfile", "caddy reload --config /etc/caddy/Caddyfile", "mktemp", "mv -f", "tail -n 20", "base64 -d", "set -eu", "-L \"$file\""} {
+	for _, w := range []string{"caddy validate --config /etc/caddy/Caddyfile", "caddy reload --config /etc/caddy/Caddyfile", "mktemp", "mv -fT", "sha256sum", ".vauban-site", "VAUBAN_SITE_FOREIGN", "[ ! -s \"$dec\" ]", "trap cleanup", "tail -n 20", "base64 -d", "set -eu", "test -L \"$file\""} {
 		if !strings.Contains(siteScript, w) {
 			t.Errorf("site script lacks %q", w)
 		}
@@ -293,19 +293,19 @@ func TestSiteWritesValidatesReloads(t *testing.T) {
 func TestSiteValidateFailureRemovesFileNoReload(t *testing.T) {
 	r := &failRunner{failOn: "'validate'", err: errors.New("ssh: exit status 6: Error: adapting config: unexpected token")}
 	_, err := stepEnv(t, cfg(config.TargetExisting), "server:site", siteIn(), r)
-	if err == nil || !strings.Contains(err.Error(), "unexpected token") {
+	if err == nil || !strings.Contains(err.Error(), "Caddy config invalid after adding shop.example.com") || !strings.Contains(err.Error(), "unexpected token") {
 		t.Fatalf("err: %v", err)
 	}
 	var acts []string
 	for _, c := range r.cmds {
 		j := strings.Join(c.Args, " ")
-		for _, a := range []string{"'write'", "'validate'", "'remove'", "'reload'"} {
+		for _, a := range []string{"'write'", "'validate'", "'rollback'", "'commit'", "'reload'"} {
 			if strings.Contains(j, "sh -s -- "+a) {
 				acts = append(acts, a)
 			}
 		}
 	}
-	if strings.Join(acts, " ") != "'write' 'validate' 'remove'" {
+	if strings.Join(acts, " ") != "'write' 'validate' 'rollback'" {
 		t.Fatalf("calls: %v", acts)
 	}
 }
@@ -366,5 +366,58 @@ func TestNewScriptsHandleRootWithoutSudo(t *testing.T) {
 		if !strings.Contains(s, `if [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO="sudo -n"; fi`) || !strings.Contains(s, "set -eu") {
 			t.Errorf("%s: no SUDO switch / set -eu", name)
 		}
+	}
+}
+
+func TestSiteForeignFileRefused(t *testing.T) {
+	r := &failRunner{failOn: "'write'", out: "VAUBAN_SITE_FOREIGN\n", err: errors.New("exit 8")}
+	_, err := stepEnv(t, cfg(config.TargetExisting), "server:site", siteIn(), r)
+	if err == nil || !strings.Contains(err.Error(), "/opt/vauban/caddy/sites/shop.caddy already exists and was not written by vauban") {
+		t.Fatalf("err: %v", err)
+	}
+	if len(r.cmds) != 1 {
+		t.Fatalf("only the write call expected, got %d (no rollback/remove of a foreign file)", len(r.cmds))
+	}
+}
+
+func TestSiteRollbackCarriesContentForHashCheck(t *testing.T) {
+	r := &failRunner{failOn: "'validate'", err: errors.New("exit 6: bad")}
+	_, _ = stepEnv(t, cfg(config.TargetExisting), "server:site", siteIn(), r)
+	b := b64(RenderSite("shop", "shop.example.com", 3000))
+	last := strings.Join(r.cmds[len(r.cmds)-1].Args, " ")
+	if !strings.Contains(last, "'rollback'") || !strings.Contains(last, "'"+b+"'") {
+		t.Fatalf("rollback args: %s", last)
+	}
+	for _, w := range []string{`mv -fT "$bak" "$file"`, `writer rm -f "$file"`, `want=$(sha256sum`} {
+		if !strings.Contains(siteScript, w) {
+			t.Errorf("rollback lacks %q", w)
+		}
+	}
+}
+
+func TestSiteScriptHashGatesOverwrite(t *testing.T) {
+	// the foreign check precedes the backup and the write.
+	i := strings.Index(siteScript, "is_ours_file; then")
+	j := strings.Index(siteScript, `writer cp -p "$file" "$bak"`)
+	k := strings.Index(siteScript, `writer mv -fT "$tmp" "$file"`)
+	if i < 0 || j < i || k < j {
+		t.Fatalf("order: %d %d %d", i, j, k)
+	}
+	if !strings.Contains(siteScript, `[ "$(hash_of "$file")" = "$rec" ]`) || !strings.Contains(siteScript, `getent passwd deploy`) || !strings.Contains(siteScript, "deploy user does not exist") {
+		t.Error("hash comparison / home check missing")
+	}
+}
+
+func TestOwnerErrorStripsControlChars(t *testing.T) {
+	r := &failRunner{failOn: "'shop'", out: "VAUBAN_OWNER_CONFLICT evil\x1b[31m/x\r\n", err: errors.New("exit 3")}
+	_, err := stepEnv(t, cfg(config.TargetExisting), "server:project", engine.Outputs{"server_sudo": "true"}, r)
+	if err == nil || strings.ContainsAny(err.Error(), "\x1b\r") || !strings.Contains(err.Error(), "evil[31m/x") {
+		t.Fatalf("err: %q", err)
+	}
+}
+
+func TestNetworkRaceSafe(t *testing.T) {
+	if !strings.Contains(networkScript, "docker network create vauban >/dev/null 2>&1 || as_deploy docker network inspect vauban >/dev/null") {
+		t.Error("create-then-inspect missing")
 	}
 }

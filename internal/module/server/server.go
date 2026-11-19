@@ -120,6 +120,13 @@ func (a auditStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, 
 	if b := au.Blockers(); len(b) > 0 {
 		return nil, fmt.Errorf("server audit found blockers:\n- %s", strings.Join(b, "\n- "))
 	}
+	if au.Caddy == remote.CaddyUserNeedsSetup {
+		// Stop before any mutating step runs.
+		if g := strings.TrimSpace(remote.CaddyGuide(au)); g != "" {
+			return nil, errors.New(g)
+		}
+		return nil, errors.New("your Caddy is not set up for vauban: run vauban audit for the one-time change to make")
+	}
 	f := au.Facts
 	return engine.Outputs{
 		"server_ip":                  a.t.Host,

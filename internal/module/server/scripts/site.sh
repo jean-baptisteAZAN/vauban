@@ -1,13 +1,17 @@
 # shellcheck shell=sh
 # shellcheck disable=SC2086
 # Manages <sites dir>/<project>.caddy and reloads the shared Caddy.
-# $1 = action (write|remove|validate|reload), $2 = mode ("sudo" or "direct"),
-# $3 = sites dir (absolute, one line), $4 = project, $5 = repo slug,
-# $6 = caddy container, $7 = base64 site file (write only).
-# write refuses unless ~deploy/apps/<project>/.vauban-owner equals the slug
-# (exit 3), refuses a symlinked site file (exit 4), writes a temp file in the
-# sites dir then renames it. validate/reload run caddy inside its container
-# and never restart or recreate it.
+# $1 = action (write|commit|rollback|validate|reload), $2 = mode ("sudo" or
+# "direct"), $3 = sites dir (absolute, one line), $4 = project, $5 = repo
+# slug, $6 = caddy container, $7 = base64 site file (write, rollback).
+# Ownership of the site file is proven by its sha256 recorded in
+# ~deploy/apps/<project>/.vauban-site after a successful validate: a file
+# whose hash differs is never overwritten or removed (exit 8,
+# "VAUBAN_SITE_FOREIGN" on stdout). write also needs the project owner marker
+# to equal the slug (exit 3) and refuses a symlink or directory (exit 4).
+# write backs the previous file up to .vauban-<project>.bak, rollback restores
+# it (or removes the new file). validate/reload run caddy inside its
+# container and never restart or recreate it.
 set -eu
 
 action=$1
@@ -53,32 +57,97 @@ pick_writer() {
 		exit 5
 	fi
 }
+hash_of() { writer sha256sum "$1" | cut -d' ' -f1; }
 
 file="$sites/$project.caddy"
+bak="$sites/.vauban-$project.bak"
+tmp=""
+dec=""
+cleanup() {
+	[ -z "$dec" ] || rm -f "$dec"
+	[ -z "$tmp" ] || writer rm -f "$tmp" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
-case "$action" in
-write)
-	pick_writer
+need_home() {
 	home=$(getent passwd deploy | cut -d: -f6)
-	cur=$(as_deploy head -n 1 "$home/apps/$project/.vauban-owner" 2>/dev/null || true)
+	if [ -z "$home" ]; then
+		echo "deploy user does not exist" >&2
+		exit 1
+	fi
+	marker="$home/apps/$project/.vauban-owner"
+	site_hash="$home/apps/$project/.vauban-site"
+}
+need_ours() {
+	cur=$(as_deploy head -n 1 "$marker" 2>/dev/null || true)
 	if [ "$cur" != "$slug" ]; then
 		echo "VAUBAN_OWNER_CONFLICT ${cur:--}"
 		exit 3
 	fi
-	if [ -L "$file" ]; then
-		echo "$file is a symlink; refusing" >&2
+}
+# is_ours_file: the site file on disk is the one vauban last recorded.
+is_ours_file() {
+	rec=$(as_deploy head -n 1 "$site_hash" 2>/dev/null || true)
+	[ -n "$rec" ] && [ "$(hash_of "$file")" = "$rec" ]
+}
+
+case "$action" in
+write)
+	pick_writer
+	need_home
+	need_ours
+	if writer test -L "$file" || writer test -d "$file"; then
+		echo "$file is a symlink or directory; refusing" >&2
 		exit 4
 	fi
+	dec=$(mktemp)
+	printf '%s' "$b64" | base64 -d >"$dec"
+	if [ ! -s "$dec" ]; then
+		echo "empty site content" >&2
+		exit 2
+	fi
+	if writer test -e "$file"; then
+		if ! is_ours_file; then
+			echo "VAUBAN_SITE_FOREIGN"
+			exit 8
+		fi
+		writer cp -p "$file" "$bak"
+	else
+		writer rm -f "$bak"
+	fi
 	tmp=$(writer mktemp "$sites/.vauban-$project.XXXXXX")
-	printf '%s' "$b64" | base64 -d | writer tee "$tmp" >/dev/null
+	writer tee "$tmp" <"$dec" >/dev/null
 	writer chmod 644 "$tmp"
-	writer mv -f "$tmp" "$file"
+	writer mv -fT "$tmp" "$file"
+	tmp=""
 	echo "site written"
 	;;
-remove)
+commit)
 	pick_writer
-	writer rm -f "$file"
-	echo "site removed"
+	need_home
+	need_ours
+	hash_of "$file" | as_deploy tee "$site_hash" >/dev/null
+	writer rm -f "$bak"
+	echo "site recorded"
+	;;
+rollback)
+	pick_writer
+	need_home
+	need_ours
+	dec=$(mktemp)
+	printf '%s' "$b64" | base64 -d >"$dec"
+	# only undo our own write: the file must still hold the content we wrote.
+	if writer test -f "$file" && ! writer test -L "$file"; then
+		want=$(sha256sum <"$dec" | cut -d' ' -f1)
+		if [ "$(hash_of "$file")" = "$want" ]; then
+			if writer test -f "$bak"; then
+				writer mv -fT "$bak" "$file"
+			else
+				writer rm -f "$file"
+			fi
+		fi
+	fi
+	echo "site rolled back"
 	;;
 validate)
 	if ! out=$(as_deploy docker exec "$container" caddy validate --config /etc/caddy/Caddyfile 2>&1); then
