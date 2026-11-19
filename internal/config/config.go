@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -149,14 +150,41 @@ func (c *Config) validateExisting() []error {
 	}
 	if s.User == "" {
 		errs = append(errs, errors.New("server.user is required"))
+	} else if !validUser(s.User) {
+		errs = append(errs, fmt.Errorf("server.user %q is not a valid unix user name", s.User))
 	}
 	if s.Port < 0 || s.Port > 65535 {
 		errs = append(errs, fmt.Errorf("server.port %d out of range 0-65535", s.Port))
 	}
 	if s.Key == "" {
 		errs = append(errs, errors.New("server.key is required (a key path or \"agent\")"))
+	} else if !validKey(s.Key) {
+		errs = append(errs, fmt.Errorf("server.key %q must not start with '-' or contain whitespace or control characters", s.Key))
 	}
 	return errs
+}
+
+var userName = regexp.MustCompile(`^[a-z_][a-z0-9_-]*[$]?$`)
+
+// validUser reports whether u is a POSIX-style user name (max 32 chars); it
+// can never start with '-' or contain '@', so it is safe in user@host.
+func validUser(u string) bool { return len(u) <= 32 && userName.MatchString(u) }
+
+// validKey reports whether k is the literal "agent" or a path that cannot be
+// read as an ssh option or split by whitespace.
+func validKey(k string) bool {
+	if k == "agent" {
+		return true
+	}
+	if strings.HasPrefix(k, "-") {
+		return false
+	}
+	for _, r := range k {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // validServerHost accepts an IP address, a dotted hostname or a single-label
