@@ -58,6 +58,10 @@ case "$container" in
 	;;
 esac
 
+# deploy cannot read the ssh user's home (the login cwd): find, docker and
+# runuser fail with "Permission denied" when started from there.
+cd /
+
 if [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO="sudo -n"; fi
 if [ "$mode" = sudo ] && [ "$(id -un)" != deploy ]; then
 	as_deploy() { $SUDO runuser -u deploy -- "$@"; }

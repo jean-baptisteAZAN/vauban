@@ -385,3 +385,11 @@ func TestDestroyScriptComposePlaceholders(t *testing.T) {
 		t.Error("project dir must be emptied, then the marker removed, then the dir")
 	}
 }
+
+func TestDestroyScriptLeavesLoginDir(t *testing.T) {
+	s := DestroyScript()
+	cd, act := strings.Index(s, "\ncd /\n"), strings.Index(s, "as_deploy true ||")
+	if cd < 0 || act < cd {
+		t.Errorf("destroy must cd / before acting as deploy (cd %d, as_deploy %d): the ssh user's home is unreadable to deploy", cd, act)
+	}
+}
