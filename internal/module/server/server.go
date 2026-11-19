@@ -28,6 +28,18 @@ var deployUserScript string
 //go:embed scripts/authorize-key.sh
 var authorizeScript string
 
+//go:embed scripts/network.sh
+var networkScript string
+
+//go:embed scripts/caddy-install.sh
+var caddyInstallScript string
+
+//go:embed scripts/project.sh
+var projectScript string
+
+//go:embed scripts/site.sh
+var siteScript string
+
 // Module implements engine.Module for an existing server.
 type Module struct{}
 
@@ -65,6 +77,10 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 		deployUserStep{t: t},
 		key,
 		authorizeStep{t: t, project: c.Project},
+		networkStep{t: t},
+		caddyStep{t: t},
+		projectStep{t: t, project: c.Project, repo: p.GitHubRepo},
+		siteStep{t: t, project: c.Project, repo: p.GitHubRepo, domain: c.Domain, port: c.AppPort},
 	}, nil
 }
 
@@ -110,6 +126,7 @@ func (a auditStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, 
 		"server_port":                strconv.Itoa(a.t.Port),
 		"server_user":                a.t.User,
 		"server_caddy_mode":          CaddyModeName(au.Caddy),
+		"server_caddy_guide":         remote.CaddyGuide(au),
 		"server_sites_dir":           au.SitesDir,
 		"server_caddy_container":     au.CaddyContainer,
 		"server_sudo":                strconv.FormatBool(f.Sudo),

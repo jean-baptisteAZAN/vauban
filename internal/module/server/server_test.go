@@ -88,7 +88,7 @@ func TestPlanIDs(t *testing.T) {
 			t.Fatalf("%s: empty describe", s.ID())
 		}
 	}
-	want := "server:audit server:docker server:deploy-user server:deploy-key server:authorize-key"
+	want := "server:audit server:docker server:deploy-user server:deploy-key server:authorize-key server:network server:caddy server:project server:site"
 	if got := strings.Join(ids, " "); got != want {
 		t.Fatalf("got %s", got)
 	}

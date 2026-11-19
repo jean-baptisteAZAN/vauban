@@ -1,0 +1,3 @@
+shop.example.com {
+	reverse_proxy shop-app:3000
+}
