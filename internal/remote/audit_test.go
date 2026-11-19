@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -237,7 +238,7 @@ func TestEvaluateFixRound1(t *testing.T) {
 		f.Caddy.SitesDirExists = false
 		a = Evaluate(f, repo)
 		g := CaddyGuide(a)
-		if a.Caddy != CaddyUserNeedsSetup || !strings.Contains(g, "mkdir -p /srv/c/sites && sudo chown deploy /srv/c/sites") || strings.Contains(g, "volumes:") {
+		if a.Caddy != CaddyUserNeedsSetup || !strings.Contains(g, "sudo mkdir -p '/srv/c/sites' && sudo chown deploy '/srv/c/sites'") || strings.Contains(g, "volumes:") {
 			t.Fatalf("%v\n%s", a.Caddy, g)
 		}
 	})
@@ -247,7 +248,7 @@ func TestCaddyGuideOnlyMountMissing(t *testing.T) {
 	f := fixture(t, "audit-user-caddy-ready.txt")
 	f.Caddy.SitesHostDir = ""
 	g := CaddyGuide(Evaluate(f, "me/shop"))
-	for _, want := range []string{"- /srv/proxy/sites:/etc/caddy/sites:ro", "mkdir -p /srv/proxy/sites && sudo chown deploy /srv/proxy/sites", "docker compose up -d", "vauban apply"} {
+	for _, want := range []string{"- /srv/proxy/sites:/etc/caddy/sites:ro", "sudo mkdir -p '/srv/proxy/sites' && sudo chown deploy '/srv/proxy/sites'", "docker compose up -d", "vauban apply"} {
 		if !strings.Contains(g, want) {
 			t.Errorf("guide missing %q:\n%s", want, g)
 		}
@@ -264,7 +265,8 @@ func TestCaddyGuideTailored(t *testing.T) {
 	f.Caddy.HasImport, f.Caddy.OnNetwork, f.Caddy.SitesHostDir = false, false, ""
 	g := CaddyGuide(Evaluate(f, "me/shop"))
 	for _, want := range []string{"import /etc/caddy/sites/*.caddy", "- /srv/proxy/sites:/etc/caddy/sites:ro",
-		"networks: [vauban]", "external: true", "docker compose up -d", "vauban apply"} {
+		"networks: [proxy, vauban]", "add vauban to the service's existing networks", "vauban:\n         external: true",
+		"docker compose up -d", "vauban apply"} {
 		if !strings.Contains(g, want) {
 			t.Errorf("guide missing %q:\n%s", want, g)
 		}
@@ -365,5 +367,63 @@ func TestEvaluateOwnerCaseInsensitive(t *testing.T) {
 	f.ProjectOwner = "acme/other"
 	if a := Evaluate(f, "acme/shop"); len(a.Blockers()) == 0 {
 		t.Fatal("another repo must block")
+	}
+}
+
+// The guide adds vauban to the Caddy's networks and never replaces them:
+// dropping the user's own network would cut Caddy off from their other apps.
+func TestCaddyGuideKeepsNetworks(t *testing.T) {
+	f := fixture(t, "audit-user-caddy-ready.txt")
+	f.Caddy.OnNetwork = false
+	f.Caddy.Networks = []string{"proxy_default", "backend"}
+	g := CaddyGuide(Evaluate(f, "me/shop"))
+	for _, want := range []string{"networks: [default, backend, vauban]", "keeping the ones it has", "external: true"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guide missing %q:\n%s", want, g)
+		}
+	}
+	if strings.Contains(g, "networks: [vauban]") {
+		t.Errorf("guide replaces the networks:\n%s", g)
+	}
+}
+
+func TestCaddyInfoNetworks(t *testing.T) {
+	c := caddyInfo("caddy", "", "proxy vauban ", false)
+	if !c.OnNetwork || !slices.Equal(c.Networks, []string{"proxy", "vauban"}) {
+		t.Fatalf("%+v", c)
+	}
+}
+
+// Before the first apply the deploy user does not exist: the guide must not
+// tell the user to chown to it (that command would fail).
+func TestCaddyGuideNoDeployUserYet(t *testing.T) {
+	f := fixture(t, "audit-user-caddy-ready.txt")
+	f.DeployUser = false
+	f.Caddy.SitesHostDir = ""
+	f.Caddy.CaddyfileHostPath = "/srv/my proxy/Caddyfile"
+	g := CaddyGuide(Evaluate(f, "me/shop"))
+	if strings.Contains(g, "chown") {
+		t.Errorf("chown to a missing user:\n%s", g)
+	}
+	for _, want := range []string{"sudo mkdir -p '/srv/my proxy/sites'", "vauban creates the deploy user"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guide missing %q:\n%s", want, g)
+		}
+	}
+}
+
+// external: true needs the network to exist before docker compose up, and
+// apply stops before creating it while the guide is pending.
+func TestCaddyGuideCreatesNetworkFirst(t *testing.T) {
+	f := fixture(t, "audit-user-caddy-ready.txt")
+	f.Caddy.OnNetwork, f.Network = false, false
+	g := CaddyGuide(Evaluate(f, "me/shop"))
+	i, j := strings.Index(g, "docker network create vauban"), strings.Index(g, "docker compose up -d")
+	if i < 0 || j < i {
+		t.Fatalf("network must be created before the recreate:\n%s", g)
+	}
+	f.Network = true
+	if g := CaddyGuide(Evaluate(f, "me/shop")); strings.Contains(g, "docker network create") {
+		t.Errorf("network exists already:\n%s", g)
 	}
 }

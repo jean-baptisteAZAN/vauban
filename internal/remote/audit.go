@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,8 +22,9 @@ type CaddyInfo struct {
 	SitesHostDir         string // host dir bind-mounted at /etc/caddy/sites, "" if none
 	CaddyfileHostPath    string // host path of the Caddyfile, "" if not on a host bind
 	HasImport, OnNetwork bool
-	DirBind              bool // whole /etc/caddy bound from the host; sites is then <src>/sites
-	SitesDirExists       bool // /etc/caddy/sites exists inside the container
+	Networks             []string // Docker networks the container is on, as docker names them
+	DirBind              bool     // whole /etc/caddy bound from the host; sites is then <src>/sites
+	SitesDirExists       bool     // /etc/caddy/sites exists inside the container
 }
 
 // Facts is the parsed output of the audit script.
@@ -150,11 +152,8 @@ func ParseFacts(out []byte) (Facts, error) {
 
 func caddyInfo(name, mountsJSON, networks string, hasImport bool) *CaddyInfo {
 	c := &CaddyInfo{Container: name, VaubanManaged: name == "vauban-caddy", HasImport: hasImport}
-	for _, n := range strings.Fields(networks) {
-		if n == "vauban" {
-			c.OnNetwork = true
-		}
-	}
+	c.Networks = strings.Fields(networks)
+	c.OnNetwork = slices.Contains(c.Networks, "vauban")
 	var ms []mount
 	if json.Unmarshal([]byte(mountsJSON), &ms) != nil {
 		return c

@@ -2,6 +2,7 @@ package remote
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -267,16 +268,43 @@ func CaddyGuide(a *Audit) string {
 			recreate = true
 			step("Mount a sites directory in the compose file of that container:\n\n     volumes:\n       - %s:/etc/caddy/sites:ro\n", sites)
 		}
-		step("Create the directory so vauban can write site files:\n\n     mkdir -p %s && sudo chown deploy %s\n", sites, sites)
+		if a.Facts.DeployUser {
+			step("Create the directory so vauban can write site files:\n\n     sudo mkdir -p %s && sudo chown deploy %s\n", quote(sites), quote(sites))
+		} else {
+			step("Create the directory:\n\n     sudo mkdir -p %s\n\n"+
+				"   vauban creates the deploy user on apply and writes the site files there with sudo.\n", quote(sites))
+		}
 	}
 	if !c.OnNetwork {
 		recreate = true
-		step("Join the vauban network (vauban creates it itself). In the same compose file, on the service:\n\n     networks: [vauban]\n\n" +
-			"   and at the top level:\n\n     networks:\n       vauban:\n         external: true\n")
+		if !a.Facts.Network {
+			step("Create the vauban network (compose needs an external network to exist; with sudo if your user is not in the docker group):\n\n     docker network create vauban\n")
+		}
+		step("Join the vauban network. In the same compose file, add vauban to the service's existing networks, keeping the ones it has:\n\n     networks: [%s]\n\n"+
+			"   and under the top-level networks: key (keep any others there):\n\n     networks:\n       vauban:\n         external: true\n", strings.Join(append(composeNetworks(c.Networks), "vauban"), ", "))
 	}
 	if recreate {
 		step("Recreate the container: docker compose up -d\n")
 	}
 	step("Run: vauban apply\n")
 	return b.String()
+}
+
+// composeNetworks turns the networks docker reports into the names a compose
+// file uses: <project>_default is that file's "default"; vauban is dropped
+// (the guide adds it) and so is the legacy bridge (not a compose network).
+func composeNetworks(names []string) []string {
+	var out []string
+	for _, n := range names {
+		switch {
+		case n == "vauban" || n == "bridge" || n == "":
+			continue
+		case strings.HasSuffix(n, "_default"):
+			n = "default"
+		}
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
