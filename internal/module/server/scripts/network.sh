@@ -18,5 +18,10 @@ if as_deploy docker network inspect vauban >/dev/null 2>&1; then
 	exit 0
 fi
 # create first, inspect on failure: race-safe against a concurrent create.
-as_deploy docker network create vauban >/dev/null 2>&1 || as_deploy docker network inspect vauban >/dev/null
+if ! err=$(as_deploy docker network create vauban 2>&1); then
+	as_deploy docker network inspect vauban >/dev/null 2>&1 || {
+		printf '%s\n' "$err" >&2
+		exit 1
+	}
+fi
 echo "network vauban created"

@@ -212,13 +212,13 @@ func (s siteStep) Apply(ctx context.Context, env *engine.Env) (engine.Outputs, e
 	if _, err := run("validate"); err != nil {
 		// Restore the previous file (or remove ours); nothing is reloaded.
 		_, rbErr := run("rollback", content)
-		err = fmt.Errorf("Caddy config invalid after adding %s: %w", s.domain, trimLines(err, 20)) //nolint:staticcheck // wording is specified
+		err = fmt.Errorf("caddy config invalid after adding %s: %w", s.domain, trimLines(err, 20))
 		if rbErr != nil {
 			err = fmt.Errorf("%w\n(restoring the previous site file also failed: %w)", err, rbErr)
 		}
 		return nil, err
 	}
-	if _, err := run("commit"); err != nil {
+	if _, err := run("commit", content); err != nil {
 		return nil, fmt.Errorf("record the site file: %w", err)
 	}
 	if _, err := run("reload"); err != nil {

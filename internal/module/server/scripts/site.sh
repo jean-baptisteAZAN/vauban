@@ -3,11 +3,13 @@
 # Manages <sites dir>/<project>.caddy and reloads the shared Caddy.
 # $1 = action (write|commit|rollback|validate|reload), $2 = mode ("sudo" or
 # "direct"), $3 = sites dir (absolute, one line), $4 = project, $5 = repo
-# slug, $6 = caddy container, $7 = base64 site file (write, rollback).
+# slug, $6 = caddy container, $7 = base64 site file (write, commit, rollback).
 # Ownership of the site file is proven by its sha256 recorded in
 # ~deploy/apps/<project>/.vauban-site after a successful validate: a file
 # whose hash differs is never overwritten or removed (exit 8,
-# "VAUBAN_SITE_FOREIGN" on stdout). write also needs the project owner marker
+# "VAUBAN_SITE_FOREIGN" on stdout). write records the new hash in
+# .vauban-site.pending before it renames the file into place, so a crash
+# before commit leaves a file that still counts as ours. write also needs the project owner marker
 # to equal the slug (exit 3) and refuses a symlink or directory (exit 4).
 # write backs the previous file up to .vauban-<project>.bak, rollback restores
 # it (or removes the new file). validate/reload run caddy inside its
@@ -63,8 +65,10 @@ file="$sites/$project.caddy"
 bak="$sites/.vauban-$project.bak"
 tmp=""
 dec=""
+hf=""
 cleanup() {
 	[ -z "$dec" ] || rm -f "$dec"
+	[ -z "$hf" ] || rm -f "$hf"
 	[ -z "$tmp" ] || writer rm -f "$tmp" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -77,6 +81,7 @@ need_home() {
 	fi
 	marker="$home/apps/$project/.vauban-owner"
 	site_hash="$home/apps/$project/.vauban-site"
+	pending="$home/apps/$project/.vauban-site.pending"
 }
 need_ours() {
 	cur=$(as_deploy head -n 1 "$marker" 2>/dev/null || true)
@@ -85,10 +90,38 @@ need_ours() {
 		exit 3
 	fi
 }
-# is_ours_file: the site file on disk is the one vauban last recorded.
+# decode: the base64 arg into $dec, and its sha256 into $want.
+decode() {
+	dec=$(mktemp)
+	printf '%s' "$b64" | base64 -d >"$dec"
+	if [ ! -s "$dec" ]; then
+		echo "empty site content" >&2
+		exit 2
+	fi
+	want=$(sha256sum <"$dec" | cut -d' ' -f1)
+	if [ -z "$want" ]; then
+		echo "cannot hash site content" >&2
+		exit 2
+	fi
+}
+# record <hash> <path>: write one line as deploy, failing loudly.
+record() {
+	if [ -z "$1" ]; then
+		echo "refusing to record an empty hash" >&2
+		exit 9
+	fi
+	hf=$(mktemp)
+	printf '%s\n' "$1" >"$hf"
+	as_deploy tee "$2" <"$hf" >/dev/null
+}
+# is_ours_file: the site file on disk is one vauban recorded (committed or
+# pending) or exactly the content about to be written.
 is_ours_file() {
+	h=$(hash_of "$file")
+	[ -n "$h" ] || return 1
 	rec=$(as_deploy head -n 1 "$site_hash" 2>/dev/null || true)
-	[ -n "$rec" ] && [ "$(hash_of "$file")" = "$rec" ]
+	pend=$(as_deploy head -n 1 "$pending" 2>/dev/null || true)
+	[ "$h" = "$rec" ] || [ "$h" = "$pend" ] || [ "$h" = "$want" ]
 }
 
 case "$action" in
@@ -100,24 +133,24 @@ write)
 		echo "$file is a symlink or directory; refusing" >&2
 		exit 4
 	fi
-	dec=$(mktemp)
-	printf '%s' "$b64" | base64 -d >"$dec"
-	if [ ! -s "$dec" ]; then
-		echo "empty site content" >&2
-		exit 2
-	fi
+	decode
 	if writer test -e "$file"; then
 		if ! is_ours_file; then
 			echo "VAUBAN_SITE_FOREIGN"
 			exit 8
 		fi
-		writer cp -p "$file" "$bak"
-	else
+		# a pending record means the file on disk was never validated: keep
+		# the backup of the last good one.
+		if ! as_deploy test -e "$pending"; then
+			writer cp -p "$file" "$bak"
+		fi
+	elif ! as_deploy test -e "$pending"; then
 		writer rm -f "$bak"
 	fi
 	tmp=$(writer mktemp "$sites/.vauban-$project.XXXXXX")
 	writer tee "$tmp" <"$dec" >/dev/null
 	writer chmod 644 "$tmp"
+	record "$want" "$pending"
 	writer mv -fT "$tmp" "$file"
 	tmp=""
 	echo "site written"
@@ -126,7 +159,13 @@ commit)
 	pick_writer
 	need_home
 	need_ours
-	hash_of "$file" | as_deploy tee "$site_hash" >/dev/null
+	decode
+	if [ "$(hash_of "$file")" != "$want" ]; then
+		echo "site file on disk is not the content vauban wrote; not recording it" >&2
+		exit 9
+	fi
+	record "$want" "$site_hash"
+	as_deploy rm -f "$pending"
 	writer rm -f "$bak"
 	echo "site recorded"
 	;;
@@ -134,11 +173,9 @@ rollback)
 	pick_writer
 	need_home
 	need_ours
-	dec=$(mktemp)
-	printf '%s' "$b64" | base64 -d >"$dec"
+	decode
 	# only undo our own write: the file must still hold the content we wrote.
 	if writer test -f "$file" && ! writer test -L "$file"; then
-		want=$(sha256sum <"$dec" | cut -d' ' -f1)
 		if [ "$(hash_of "$file")" = "$want" ]; then
 			if writer test -f "$bak"; then
 				writer mv -fT "$bak" "$file"
@@ -147,6 +184,7 @@ rollback)
 			fi
 		fi
 	fi
+	as_deploy rm -f "$pending"
 	echo "site rolled back"
 	;;
 validate)

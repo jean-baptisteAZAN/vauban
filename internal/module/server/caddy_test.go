@@ -293,7 +293,7 @@ func TestSiteWritesValidatesReloads(t *testing.T) {
 func TestSiteValidateFailureRemovesFileNoReload(t *testing.T) {
 	r := &failRunner{failOn: "'validate'", err: errors.New("ssh: exit status 6: Error: adapting config: unexpected token")}
 	_, err := stepEnv(t, cfg(config.TargetExisting), "server:site", siteIn(), r)
-	if err == nil || !strings.Contains(err.Error(), "Caddy config invalid after adding shop.example.com") || !strings.Contains(err.Error(), "unexpected token") {
+	if err == nil || !strings.Contains(err.Error(), "caddy config invalid after adding shop.example.com") || !strings.Contains(err.Error(), "unexpected token") {
 		t.Fatalf("err: %v", err)
 	}
 	var acts []string
@@ -388,7 +388,7 @@ func TestSiteRollbackCarriesContentForHashCheck(t *testing.T) {
 	if !strings.Contains(last, "'rollback'") || !strings.Contains(last, "'"+b+"'") {
 		t.Fatalf("rollback args: %s", last)
 	}
-	for _, w := range []string{`mv -fT "$bak" "$file"`, `writer rm -f "$file"`, `want=$(sha256sum`} {
+	for _, w := range []string{`mv -fT "$bak" "$file"`, `writer rm -f "$file"`, `decode`} {
 		if !strings.Contains(siteScript, w) {
 			t.Errorf("rollback lacks %q", w)
 		}
@@ -403,7 +403,7 @@ func TestSiteScriptHashGatesOverwrite(t *testing.T) {
 	if i < 0 || j < i || k < j {
 		t.Fatalf("order: %d %d %d", i, j, k)
 	}
-	if !strings.Contains(siteScript, `[ "$(hash_of "$file")" = "$rec" ]`) || !strings.Contains(siteScript, `getent passwd deploy`) || !strings.Contains(siteScript, "deploy user does not exist") {
+	if !strings.Contains(siteScript, `[ "$h" = "$rec" ]`) || !strings.Contains(siteScript, `getent passwd deploy`) || !strings.Contains(siteScript, "deploy user does not exist") {
 		t.Error("hash comparison / home check missing")
 	}
 }
@@ -417,7 +417,50 @@ func TestOwnerErrorStripsControlChars(t *testing.T) {
 }
 
 func TestNetworkRaceSafe(t *testing.T) {
-	if !strings.Contains(networkScript, "docker network create vauban >/dev/null 2>&1 || as_deploy docker network inspect vauban >/dev/null") {
-		t.Error("create-then-inspect missing")
+	for _, w := range []string{"err=$(as_deploy docker network create vauban 2>&1)", "docker network inspect vauban >/dev/null 2>&1 || {", `printf '%s\n' "$err" >&2`} {
+		if !strings.Contains(networkScript, w) {
+			t.Errorf("network script lacks %q", w)
+		}
+	}
+}
+
+func TestSiteResumeSafe(t *testing.T) {
+	// is_ours_file accepts committed, pending and about-to-write hashes.
+	for _, w := range []string{`[ "$h" = "$rec" ] || [ "$h" = "$pend" ] || [ "$h" = "$want" ]`,
+		`.vauban-site.pending`, `record "$want" "$pending"`, `as_deploy rm -f "$pending"`,
+		`if ! as_deploy test -e "$pending"; then`, `refusing to record an empty hash`, `exit 9`} {
+		if !strings.Contains(siteScript, w) {
+			t.Errorf("site script lacks %q", w)
+		}
+	}
+	// pending is recorded before the file is renamed into place.
+	if i, j := strings.Index(siteScript, `record "$want" "$pending"`), strings.Index(siteScript, `writer mv -fT "$tmp" "$file"`); i < 0 || j < i {
+		t.Errorf("pending must precede mv: %d %d", i, j)
+	}
+	// no pipe into tee: failures must be detected.
+	if strings.Contains(siteScript, "| as_deploy tee") || strings.Contains(siteScript, "| writer tee") {
+		t.Error("pipe into tee")
+	}
+	// commit receives the content and verifies it.
+	r := &fakeRunner{}
+	if _, err := stepEnv(t, cfg(config.TargetExisting), "server:site", siteIn(), r); err != nil {
+		t.Fatal(err)
+	}
+	c := strings.Join(r.cmds[2].Args, " ")
+	if !strings.Contains(c, "'commit'") || !strings.Contains(c, "'"+b64(RenderSite("shop", "shop.example.com", 3000))+"'") {
+		t.Fatalf("commit args: %s", c)
+	}
+	if !strings.Contains(siteScript, `[ "$(hash_of "$file")" != "$want" ]`) {
+		t.Error("commit does not verify the file")
+	}
+}
+
+func TestAuditListSkipsDotEntries(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "remote", "audit.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `ls -1 "$deploy_home/apps"`) || strings.Contains(string(b), "ls -1a") || strings.Contains(string(b), "ls -a") || strings.Contains(string(b), "ls -1A") {
+		t.Error("projects list must skip dot entries")
 	}
 }
