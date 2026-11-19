@@ -39,7 +39,11 @@ func newDestroyCmd() *cobra.Command {
 		Long: "Destroy the server (tofu destroy), delete the deploy secrets and forget\n" +
 			"vauban's state. Generated files and the local deploy key stay in place.\n\n" +
 			"Always asks for the project name; without a terminal pass --confirm <project>.\n" +
-			"--yes and --force are not enough.",
+			"--yes and --force are not enough.\n\n" +
+			"With target: existing, nothing is destroyed but this project: its containers,\n" +
+			"Caddy site, ~deploy/apps/<project> and deploy key line are removed from the\n" +
+			"server; Docker, Caddy and other projects stay. --purge also deletes the\n" +
+			"project's Docker volumes.",
 		Args: cobra.NoArgs,
 		RunE: abortable(runDestroy),
 	}

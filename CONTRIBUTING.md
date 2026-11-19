@@ -43,7 +43,7 @@ checks are green.
 VAUBAN_E2E=1 go test -tags e2e ./internal/e2e/ -v -timeout 15m
 ```
 
-The container runs `--privileged` (it runs its own dockerd), is published only on `127.0.0.1` on a random port, never gets the host's Docker socket, and is removed at the end (`docker rm -f`). Keys and `HOME` are temporary. The first run builds the image and pulls `caddy:2` inside the container, so it needs network access.
+The container runs `--privileged` (it runs its own dockerd), is published only on `127.0.0.1` on a random port, never gets the host's Docker socket, and is labelled `vauban-e2e` and removed at the end (`docker rm -f`). If the run is killed (a Go timeout panic skips cleanup), remove strays with `docker rm -f $(docker ps -aq --filter label=vauban-e2e)`. Keys and `HOME` are temporary. The first run builds the image and pulls `caddy:2` inside the container, so it needs network access.
 
 ### Golden files
 

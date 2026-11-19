@@ -209,7 +209,7 @@ Or pass `--target existing --host <ip> --ssh-user <user> --ssh-key <path|agent> 
 vauban audit
 ```
 
-`audit` is read-only: it runs a script over SSH that writes nothing and only calls `sudo -n true` and `sudo -n sshd -T` as sudo. It reports the OS, sudo, Docker and Compose, the `deploy` user, the ports 80/443, any Caddy found, the firewall, SSH password login, free disk and pending updates, and says what `apply` would do or why it would stop. `plan` and `apply` run the same audit first and stop before any change if it finds a blocker. The first connection pins the host key in `.vauban/known_hosts`; if it later changes, vauban stops and tells you to remove the line yourself if the change is expected.
+`audit` is read-only: it runs a script over SSH that writes nothing. It uses `sudo -n` only to read: `sudo -n true`, `sudo -n sshd -T`, and, when your user is not in the `docker` group, read-only `sudo -n docker` queries (version, compose version, network ls, ps, inspect, and reading or testing files inside the Caddy container). It reports the OS, sudo, Docker and Compose, the `deploy` user, the ports 80/443, any Caddy found, the firewall, SSH password login, free disk and pending updates, and says what `apply` would do or why it would stop. `plan` and `apply` run the same audit first and stop before any change if it finds a blocker. The first connection pins the host key in `.vauban/known_hosts`; if it later changes, vauban stops and tells you to remove the line yourself if the change is expected.
 
 ### What `apply` installs, and what it needs
 

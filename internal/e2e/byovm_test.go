@@ -42,7 +42,7 @@ func sh(t *testing.T, ctx context.Context, name string, args ...string) string {
 func startHost(t *testing.T, ctx context.Context, pub string) (container string, port int) {
 	t.Helper()
 	sh(t, ctx, "docker", "build", "-q", "-t", image, "testdata")
-	container = sh(t, ctx, "docker", "run", "-d", "--rm", "--privileged",
+	container = sh(t, ctx, "docker", "run", "-d", "--rm", "--privileged", "--label", "vauban-e2e",
 		"-e", "OPS_PUBKEY="+pub, "-p", "127.0.0.1::22", image)
 	t.Cleanup(func() {
 		_ = exec.Command("docker", "rm", "-f", container).Run()
@@ -215,7 +215,7 @@ func TestBringYourOwnVM(t *testing.T) {
 		}
 		h.mustEq("1", `sudo -n grep -c '# vauban:shop$' /home/deploy/.ssh/authorized_keys`)
 		h.mustEq("1", `sudo -n grep -c . /home/deploy/.ssh/authorized_keys`)
-		h.mustEq("vauban", `docker -H unix:///var/run/docker.sock network ls --format '{{.Name}}' 2>/dev/null | grep -x vauban || sudo -n docker network ls --format '{{.Name}}' | grep -x vauban`)
+		h.mustEq("vauban", `sudo -n docker network ls --format '{{.Name}}' | grep -x vauban`)
 		h.mustEq("true", `sudo -n docker inspect -f '{{.State.Running}}' vauban-caddy`)
 		h.mustEq(slug, `sudo -n cat /home/deploy/apps/shop/.vauban-owner`)
 		h.mustEq(strings.TrimSpace(server.RenderSite(project, domain, 8080)), `sudo -n cat `+sites+`/shop.caddy`)
@@ -234,8 +234,6 @@ func TestBringYourOwnVM(t *testing.T) {
 	if err := os.Remove(filepath.Join(root2, ".vauban", "state.json")); err != nil {
 		t.Fatal(err)
 	}
-	tg2, _ := remote.TargetFor(root2, srv)
-	_ = tg2
 	if _, err := execute(t, ctx, root2, steps(t, root2, srv, project, slug, domain), run); err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
