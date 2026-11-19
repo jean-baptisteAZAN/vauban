@@ -35,7 +35,7 @@ func (s *serverFake) Run(_ context.Context, c engine.Cmd) ([]byte, error) {
 	}
 	s.calls = append(s.calls, c)
 	s.stdin = append(s.stdin, string(in))
-	if c.Name == "ssh" && len(scriptArgs(c)) == 1 {
+	if a := scriptArgs(c); c.Name == "ssh" && len(a) == 1 && a[0] == "shop" {
 		return []byte(s.audit), nil
 	}
 	return nil, nil
@@ -292,5 +292,82 @@ func TestDestroyCloudConfigOnExistingStateRefused(t *testing.T) {
 	}
 	if len(f.calls) != 0 || !exists(statePath(root)) {
 		t.Errorf("destroy acted: %d calls", len(f.calls))
+	}
+}
+
+// audits counts the audit runs.
+func (s *serverFake) audits() int {
+	n := 0
+	for _, a := range s.sshCalls() {
+		if len(a) == 1 && a[0] == "shop" {
+			n++
+		}
+	}
+	return n
+}
+
+// existingApplyEnv is a project ready for a first existing-server apply whose
+// server answers the audit with fixture.
+func existingApplyEnv(t *testing.T, fixture string) (string, *serverFake) {
+	t.Helper()
+	root, f := appliedExisting(t)
+	if err := os.Remove(statePath(root)); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile("../remote/testdata/" + fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.audit = string(b)
+	f.reset()
+	return root, f
+}
+
+func TestApplyExistingShowsAuditBeforePlan(t *testing.T) {
+	root, f := existingApplyEnv(t, "audit-user-caddy-ready.txt")
+	out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	i, j := strings.Index(out, "Docker engine"), strings.Index(out, "\nserver\n")
+	if i < 0 || j < 0 || i > j {
+		t.Errorf("audit table must come before the plan:\n%s", out)
+	}
+	// One audit before the prompt, one in the server:audit step.
+	if n := f.audits(); n != 2 {
+		t.Errorf("audits = %d, want 2: %q", n, f.sshCalls())
+	}
+	// Re-apply: server:audit is done, only the pre-prompt audit runs.
+	f.reset()
+	if out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes"); err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if n := f.audits(); n != 1 {
+		t.Errorf("re-apply audits = %d, want 1", n)
+	}
+}
+
+func TestApplyExistingStopsOnBlockers(t *testing.T) {
+	for _, tc := range []struct{ fixture, want string }{
+		{"audit-nginx.txt", "nginx"},
+		{"audit-user-caddy-baked.txt", "make this one-time change"},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			root, f := existingApplyEnv(t, tc.fixture)
+			out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes")
+			wantExit(t, err, 1, "", out)
+			if !strings.Contains(out, tc.want) || !strings.Contains(out, "Docker engine") {
+				t.Errorf("output lacks the audit or %q:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, "\nserver\n") {
+				t.Errorf("plan shown although apply cannot run:\n%s", out)
+			}
+			if n := len(f.sshCalls()); n != 1 || f.audits() != 1 {
+				t.Errorf("ssh calls = %v, want only the audit", f.sshCalls())
+			}
+			if len(f.secretsSet()) != 0 {
+				t.Errorf("secrets set: %v", f.secretsSet())
+			}
+		})
 	}
 }

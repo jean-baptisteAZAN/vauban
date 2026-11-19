@@ -128,22 +128,24 @@ func sshKeyChoices() ([]ui.Choice, error) {
 	return out, nil
 }
 
-// writeAudit runs the audit once for plan: it prints the table, the Caddy
-// guide when needed, and returns what must go under "before apply:" (the
-// blockers, or the ssh error: plan still succeeds).
-func writeAudit(ctx context.Context, w io.Writer, root, repo string, c *config.Config) []string {
+// writeAudit runs the audit once (plan, and apply before its prompt): it
+// prints the table, the Caddy guide when needed, and returns what must go
+// under "before apply:" (the blockers, or the ssh error: plan still
+// succeeds), and whether apply must stop (those, or a pending guide).
+func writeAudit(ctx context.Context, w io.Writer, root, repo string, c *config.Config) (lines []string, stop bool) {
 	t, err := remote.TargetFor(root, c.Server)
 	if err != nil {
-		return []string{err.Error()}
+		return []string{err.Error()}, true
 	}
 	a, err := remote.RunAudit(ctx, cmdRunner, t, c.Project, repo)
 	if err != nil {
-		return []string{"cannot reach " + t.User + "@" + t.Host + ": " + err.Error()}
+		return []string{"cannot reach " + t.User + "@" + t.Host + ": " + err.Error()}, true
 	}
 	ui.RenderAudit(w, a)
-	if g := remote.CaddyGuide(a); a.Caddy == remote.CaddyUserNeedsSetup && g != "" {
+	needsSetup := a.Caddy == remote.CaddyUserNeedsSetup
+	if g := remote.CaddyGuide(a); needsSetup && g != "" {
 		ui.Section(w, "caddy setup")
 		fmt.Fprintln(w, g)
 	}
-	return a.Blockers()
+	return a.Blockers(), needsSetup || len(a.Blockers()) > 0
 }

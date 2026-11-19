@@ -89,7 +89,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	var auditLines []string
 	if c.Existing() {
 		fmt.Fprintln(w)
-		auditLines = writeAudit(cmd.Context(), w, root, p.GitHubRepo, c)
+		auditLines, _ = writeAudit(cmd.Context(), w, root, p.GitHubRepo, c)
 	}
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)

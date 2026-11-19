@@ -99,6 +99,17 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	ui.Warnings(w, "warnings:", notices.Warnings)
 	writeNotes(w, notices.Notes)
 	writeConfigSummary(w, p, c)
+	if c.Existing() {
+		// The server as it is now, before asking: blockers or a pending
+		// Caddy change stop here, before any change. The server:audit step
+		// runs it again on a first apply (its outputs feed the other steps).
+		fmt.Fprintln(w)
+		lines, stop := writeAudit(ctx, w, root, p.GitHubRepo, c)
+		if stop {
+			ui.Warnings(w, "cannot apply:", lines)
+			return &ExitError{Code: 1, Err: errors.New("the server is not ready (see above) — nothing was applied")}
+		}
+	}
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
 	writeSiteChange(w, pl, c)
