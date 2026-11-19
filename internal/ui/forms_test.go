@@ -69,3 +69,29 @@ func TestAnsweredFormGrowsLastFrame(t *testing.T) {
 		t.Error("lineCount")
 	}
 }
+
+func TestTargetChoices(t *testing.T) {
+	got := targetChoices()
+	if len(got) != 2 || got[0].ID != "cloud" || got[0].Label != "Create a new VM" ||
+		got[1].ID != "existing" || got[1].Label != "Use an existing server" {
+		t.Errorf("targetChoices = %+v", got)
+	}
+}
+
+func TestDefaultSSHUser(t *testing.T) {
+	t.Setenv("USER", "jb")
+	if got := defaultSSHUser(); got != "jb" {
+		t.Errorf("defaultSSHUser = %q", got)
+	}
+}
+
+func TestValidateDomain(t *testing.T) {
+	if validateDomain("a.example.com") != nil {
+		t.Error("valid domain rejected")
+	}
+	for _, bad := range []string{"", "nodot", "a b.com"} {
+		if validateDomain(bad) == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

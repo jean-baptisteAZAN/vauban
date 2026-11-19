@@ -225,3 +225,15 @@ func validHostname(h string) bool {
 	}
 	return true
 }
+
+// ValidHostname reports whether h is a valid public domain (the rule Validate
+// applies to Domain), for form validation.
+func ValidHostname(h string) bool { return validHostname(h) }
+
+// ValidServerHost reports whether h is a valid SSH host (the rule Validate
+// applies to server.host), for form validation.
+func ValidServerHost(h string) bool { return validServerHost(h) }
+
+// ValidUser reports whether u is a valid SSH user name (the rule Validate
+// applies to server.user), for form validation.
+func ValidUser(u string) bool { return validUser(u) }

@@ -114,7 +114,8 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 	}, nil
 }
 
-// CheckCloud refuses a cloud change while servers are applied, or may exist
+// CheckCloud refuses a cloud change (a switch to target: existing counts as
+// one) while servers are applied, or may exist
 // after an interrupted first apply: the applied fingerprint, the rendered
 // one, or the main.tf on disk names another cloud. With neither an applied
 // nor a rendered fingerprint (never applied, or after vauban destroy, which
@@ -128,7 +129,11 @@ func CheckCloud(root string, st *engine.State, c *config.Config) error {
 	}
 	disk, _ := readFingerprint(root)
 	for _, fp := range []string{applied, rendered, disk} {
-		if old, _, _ := strings.Cut(fp, "/"); fp != "" && old != c.Cloud {
+		old, _, _ := strings.Cut(fp, "/")
+		if fp != "" && c.Existing() {
+			return fmt.Errorf("changing target (cloud → existing) is not supported in place: run vauban destroy first, then vauban apply")
+		}
+		if fp != "" && old != c.Cloud {
 			return fmt.Errorf("changing cloud (%s → %s) is not supported in place: run vauban destroy first, then vauban apply", old, c.Cloud)
 		}
 	}

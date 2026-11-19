@@ -947,3 +947,18 @@ func TestCloudChangeRefusedAfterInterruptedApply(t *testing.T) {
 		t.Errorf("after destroy: %v", err)
 	}
 }
+
+func TestCheckCloudRefusesTargetChange(t *testing.T) {
+	root := t.TempDir()
+	existing := &config.Config{Project: "shop", Target: config.TargetExisting}
+	for _, key := range []string{"infra_fingerprint", "rendered_fingerprint"} {
+		st := &engine.State{Done: map[string]bool{}, Outputs: engine.Outputs{key: "hetzner/nbg1/cx23"}}
+		err := CheckCloud(root, st, existing)
+		if err == nil || !strings.Contains(err.Error(), "target") {
+			t.Errorf("%s: want target refusal, got %v", key, err)
+		}
+	}
+	if err := CheckCloud(root, &engine.State{Done: map[string]bool{}, Outputs: engine.Outputs{}}, existing); err != nil {
+		t.Errorf("no infra state: %v", err)
+	}
+}

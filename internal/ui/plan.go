@@ -184,6 +184,17 @@ func PlanFooter(w io.Writer) {
 	fmt.Fprintln(w, "next: vauban apply")
 }
 
+// PlanFooterExisting writes the next command for an existing server (no
+// Terraform state to back up).
+func PlanFooterExisting(w io.Writer) {
+	fmt.Fprintln(w)
+	if Styled() {
+		fmt.Fprintln(w, Muted.Render("next: ")+Title.Render("vauban apply"))
+		return
+	}
+	fmt.Fprintln(w, "next: vauban apply")
+}
+
 // DestructivePlan writes a warning title and a tofu plan, with the lines that
 // destroy or replace resources in red when styled.
 func DestructivePlan(w io.Writer, title, plan string) {

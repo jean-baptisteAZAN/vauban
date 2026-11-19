@@ -53,6 +53,7 @@ func addConfigFlags(cmd *cobra.Command) {
 	f.String("domain", "", "public domain (default: <ip>.sslip.io)")
 	f.Int("port", 0, "port the app listens on (default: from Dockerfile or stack)")
 	f.Bool("reconfigure", false, "ask again even if vauban.yaml exists")
+	addTargetFlags(cmd)
 }
 
 func runPlan(cmd *cobra.Command, _ []string) error {
@@ -83,19 +84,32 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 
 	w := cmd.OutOrStdout()
 	writeConfigSummary(w, p, c)
+	var auditLines []string
+	if c.Existing() {
+		fmt.Fprintln(w)
+		auditLines = writeAudit(cmd.Context(), w, root, p.GitHubRepo, c)
+	}
 	ui.RenderPlan(w, pl.items(root, force))
 	writeDrift(w, root, pl.st, c, pl.infraStale)
-	if c.Domain != "" {
+	switch {
+	case c.Existing():
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "DNS: point "+c.Domain+" to "+c.Server.Host)
+	case c.Domain != "":
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "DNS: point "+c.Domain+" to the server IP (shown after apply)")
 	}
 	notices, err := engine.Preflight(pl.p, c, pl.mods, pl.preflightOptions(root, c))
-	var lines []string
+	lines := auditLines
 	if err != nil {
-		lines = strings.Split(err.Error(), "\n")
+		lines = append(lines, strings.Split(err.Error(), "\n")...)
 	}
 	ui.Warnings(w, "before apply:", append(lines, notices.Warnings...))
 	writeNotes(w, notices.Notes)
+	if c.Existing() {
+		ui.PlanFooterExisting(w)
+		return nil
+	}
 	ui.PlanFooter(w)
 	return nil
 }
@@ -141,6 +155,9 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	if existing != nil {
 		*c = *existing
 	}
+	if err := applyTargetFlags(cmd, c); err != nil {
+		return nil, err
+	}
 	for name, dst := range map[string]*string{"cloud": &c.Cloud, "region": &c.Region, "size": &c.Size, "domain": &c.Domain} {
 		if f.Changed(name) {
 			*dst, _ = f.GetString(name)
@@ -149,7 +166,7 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	if f.Changed("port") {
 		c.AppPort, _ = f.GetInt("port")
 	}
-	if existing != nil && c.Cloud != existing.Cloud {
+	if existing != nil && !c.Existing() && c.Cloud != existing.Cloud {
 		if !f.Changed("region") {
 			c.Region = ""
 		}
@@ -161,6 +178,10 @@ func resolveConfig(cmd *cobra.Command, p *detect.Project) (*config.Config, error
 	if existing == nil || reconfigure {
 		if interactive() && !yes {
 			if c, err = ui.AskConfig(p, c, formSources(p)); err != nil {
+				return nil, err
+			}
+		} else if c.Existing() {
+			if err := missingExistingFlags(c); err != nil {
 				return nil, err
 			}
 		} else if c.Cloud == "" {
@@ -245,6 +266,7 @@ func formSources(p *detect.Project) ui.Sources {
 			return choices(prov.Sizes(ctx, region))
 		},
 		DefaultPort: defaultPort(p),
+		SSHKeys:     sshKeyChoices,
 	}
 }
 
@@ -295,7 +317,9 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 	if pl.st, err = engine.LoadState(root); err != nil {
 		return nil, err
 	}
-	pl.infraStale = infra.StaleSteps(root, pl.st, c)
+	if !c.Existing() { // no infra module, no infra fingerprint
+		pl.infraStale = infra.StaleSteps(root, pl.st, c)
+	}
 	stale := slices.Concat(pl.infraStale, deploy.StaleSteps(pl.st, c))
 	if len(pl.infraStale) > 0 {
 		// The server may be replaced: re-read its IP after infra:output.
@@ -324,6 +348,9 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 //     have left resources (tofu and the quota hint on its error back it up);
 //   - block otherwise (a first create).
 func (pl *planned) preflightOptions(root string, c *config.Config) engine.PreflightOptions {
+	if c.Existing() {
+		return engine.PreflightOptions{Quota: engine.QuotaSkip}
+	}
 	applied := pl.st.Outputs["infra_fingerprint"]
 	switch {
 	case pl.st.Done["infra:apply"] || applied == infraFingerprint(c):
@@ -414,7 +441,11 @@ func planItem(s engine.Step, root string, st *engine.State, overwrite bool) ui.P
 
 func writeConfigSummary(w io.Writer, p *detect.Project, c *config.Config) {
 	ui.Heading(w, p.Name)
-	ui.Row(w, "cloud", orDefault(cloudLabels[c.Cloud], c.Cloud)+" · "+c.Region+" · "+c.Size)
+	if c.Existing() && c.Server != nil {
+		ui.Row(w, "server", fmt.Sprintf("%s@%s:%d", c.Server.User, c.Server.Host, c.Server.SSHPort()))
+	} else {
+		ui.Row(w, "cloud", orDefault(cloudLabels[c.Cloud], c.Cloud)+" · "+c.Region+" · "+c.Size)
+	}
 	ui.Row(w, "domain", orDefault(c.Domain, "<ip>.sslip.io"+ui.Hint(" (after apply)")))
 	ui.Row(w, "port", fmt.Sprint(c.AppPort))
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -72,7 +73,11 @@ func Preflight(p *detect.Project, c *config.Config, mods []Module, opts Prefligh
 		}
 	}
 
-	if selected["infra"] {
+	if selected["server"] && c.Existing() {
+		errs = append(errs, checkSSH(c)...)
+	}
+
+	if selected["infra"] && !c.Existing() {
 		if _, ok := tools.Tofu(); !ok {
 			errs = append(errs, errors.New("OpenTofu (tofu) not found (install: https://opentofu.org/docs/intro/install/)"))
 		}
@@ -93,6 +98,37 @@ func Preflight(p *detect.Project, c *config.Config, mods []Module, opts Prefligh
 		}
 	}
 	return notices, errors.Join(errs...)
+}
+
+// checkSSH checks what reaching an existing server needs: ssh and
+// ssh-keygen on PATH, and the key file readable (or an ssh-agent socket).
+func checkSSH(c *config.Config) []error {
+	var errs []error
+	for _, bin := range []string{"ssh", "ssh-keygen"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			errs = append(errs, fmt.Errorf("%s not found (install OpenSSH)", bin))
+		}
+	}
+	if c.Server == nil {
+		return errs // Validate reports it
+	}
+	key, err := c.Server.KeyPath()
+	switch {
+	case err != nil:
+		errs = append(errs, err)
+	case key == "":
+		if os.Getenv("SSH_AUTH_SOCK") == "" {
+			errs = append(errs, errors.New("server.key is agent but no ssh-agent is running (SSH_AUTH_SOCK is not set)"))
+		}
+	default:
+		f, err := os.Open(key)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("ssh key %s is not readable: %w", key, errors.Unwrap(err)))
+		} else {
+			_ = f.Close()
+		}
+	}
+	return errs
 }
 
 // checkQuota asks prov for the quota of c's region and size, with its own

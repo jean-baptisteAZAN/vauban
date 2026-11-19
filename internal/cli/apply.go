@@ -146,6 +146,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	ui.ApplyFooter(w, footer(c, pl.st, before))
+	if c.Existing() {
+		fmt.Fprintln(w, ui.Hint("deploys run from GitHub Actions: push to main to deploy https://"+c.Domain))
+	}
 	return nil
 }
 
@@ -154,7 +157,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 // secrets changed (steps newly done since before) so a push redeploys.
 func footer(c *config.Config, st *engine.State, before map[string]bool) ui.Footer {
 	f := ui.Footer{Domain: st.Outputs["domain"]}
-	if c.Domain != "" {
+	if c.Existing() {
+		f.Domain = c.Domain
+	}
+	if c.Domain != "" && !c.Existing() { // an existing server's DNS is the plan's line
 		if ip := st.Outputs["server_ip"]; ip != "" {
 			f.DNS = append(f.DNS, "A "+c.Domain+" → "+ip)
 		}

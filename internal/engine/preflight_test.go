@@ -252,3 +252,59 @@ func runPreflight(p *detect.Project, c *config.Config, mods []Module, opts Prefl
 	_, err := Preflight(p, c, mods, opts)
 	return err
 }
+
+type serverModule struct{ idModule }
+
+func (serverModule) ID() string { return "server" }
+
+var existingMods = []Module{idModule("container"), idModule("ci"), serverModule{}, idModule("deploy")}
+
+func existingConfig(key string) *config.Config {
+	return &config.Config{Project: "widget", Target: config.TargetExisting, Domain: "a.example.com", AppPort: 8080,
+		Server: &config.Server{Host: "203.0.113.10", User: "jb", Key: key}}
+}
+
+func TestPreflightExistingNoCloudCalls(t *testing.T) {
+	called, quota := false, false
+	fr := preflightSetup(t, preflightProvider{authCalled: &called, quotaCalled: &quota}, "ssh", "ssh-keygen")
+	key := filepath.Join(t.TempDir(), "k")
+	if err := os.WriteFile(key, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runPreflight(&detect.Project{GitHubRepo: "acme/widget"}, existingConfig(key), existingMods, PreflightOptions{Quota: QuotaBlock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called || quota {
+		t.Errorf("cloud called: auth=%v quota=%v", called, quota)
+	}
+	if len(fr.Calls) != 1 || fr.Calls[0].Name != "gh" {
+		t.Errorf("calls = %v", fr.Calls)
+	}
+}
+
+func TestPreflightExistingProblems(t *testing.T) {
+	preflightSetup(t, preflightProvider{})
+	t.Setenv("SSH_AUTH_SOCK", "")
+	err := runPreflight(&detect.Project{GitHubRepo: "acme/widget"}, existingConfig("/nonexistent/key"), existingMods, PreflightOptions{})
+	if err == nil {
+		t.Fatal("no error")
+	}
+	for _, want := range []string{"ssh not found", "ssh-keygen not found", "/nonexistent/key"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in:\n%s", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "OpenTofu") {
+		t.Errorf("infra check ran in existing mode:\n%s", err)
+	}
+	err = runPreflight(&detect.Project{GitHubRepo: "acme/widget"}, existingConfig("agent"), existingMods, PreflightOptions{})
+	if err == nil || !strings.Contains(err.Error(), "SSH_AUTH_SOCK") {
+		t.Errorf("agent without socket: %v", err)
+	}
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/sock")
+	err = runPreflight(&detect.Project{GitHubRepo: "acme/widget"}, existingConfig("agent"), existingMods, PreflightOptions{})
+	if err != nil && strings.Contains(err.Error(), "SSH_AUTH_SOCK") {
+		t.Errorf("socket set but flagged: %v", err)
+	}
+}
