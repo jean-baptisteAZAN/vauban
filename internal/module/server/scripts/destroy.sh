@@ -10,9 +10,13 @@
 # this order: compose down (-v with purge), the site file (only a file vauban
 # recorded, then validate and reload; a failed validate restores it), the
 # project dir, and last the "# vauban:<project>" authorized_keys line.
-# stdout markers: VAUBAN_PROJECT_ABSENT (nothing to do, exit 0),
+# compose interpolates ${IMAGE_TAG:?} and ${APP_PORT:?} even for down and
+# config, so both calls get placeholder values.
+# With the project dir absent, plan prints VAUBAN_PROJECT_ABSENT; run then
+# only removes the authorized_keys line (a rerun after a crash must finish).
+# stdout markers: VAUBAN_PROJECT_ABSENT (nothing else to do, exit 0),
 # VAUBAN_OWNER_CONFLICT <other> (exit 3), VAUBAN_SITE_FOREIGN (file kept,
-# exit 0). Exit 4 symlink, 5 sites dir not writable, 6 caddy validate failed
+# exit 0). Exit 4 symlink, 5 cannot act as deploy / sites dir not writable, 6 caddy validate failed
 # (site restored), 7 caddy reload failed.
 set -eu
 
@@ -61,10 +65,17 @@ else
 	as_deploy() { "$@"; }
 fi
 
+# a missing sudo must never look like an absent project.
+as_deploy true || {
+	echo "cannot act as deploy (sudo -n runuser failed)" >&2
+	exit 5
+}
+
 home=$(getent passwd deploy | cut -d: -f6)
+absent=no
 if [ -z "$home" ]; then
-	echo "VAUBAN_PROJECT_ABSENT"
-	exit 0
+	absent=yes
+	home=""
 fi
 apps="$home/apps"
 dir="$apps/$project"
@@ -73,12 +84,53 @@ compose="$dir/compose.yaml"
 cproject="vauban-$project"
 
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+# dc runs compose for this project with placeholders for the required vars.
+dc() { as_deploy env IMAGE_TAG=destroy APP_PORT=1 docker compose -p "$cproject" --project-directory "$dir" -f "$compose" "$@"; }
 
-if as_deploy test -L "$apps" || as_deploy test -L "$dir"; then
-	echo "$dir is a symlink; refusing" >&2
-	exit 4
+# remove_key_line drops this project's authorized_keys line (exact suffix).
+remove_key_line() {
+	[ -n "$home" ] || return 0
+	as_deploy sh -s -- "$home" "$project" <<'INNER'
+set -eu
+umask 077
+home=$1
+project=$2
+ak="$home/.ssh/authorized_keys"
+if [ ! -f "$ak" ]; then
+	exit 0
 fi
-if ! as_deploy test -d "$dir"; then
+tmp=$(mktemp "$home/.ssh/.vauban-ak.XXXXXX")
+trap 'rm -f "$tmp"' EXIT INT TERM
+awk -v s=" # vauban:$project" '{ n = length($0) - length(s) + 1; if (n >= 1 && substr($0, n) == s) next; print }' "$ak" >"$tmp"
+chmod 600 "$tmp"
+if cmp -s "$tmp" "$ak"; then
+	exit 0
+fi
+mv -f "$tmp" "$ak"
+INNER
+}
+
+# pick_writer: deploy when it can write the sites dir, else root (sudo mode only).
+pick_writer() {
+	if as_deploy test -w "$sites"; then
+		writer() { as_deploy "$@"; }
+	elif [ "$mode" = sudo ]; then
+		writer() { $SUDO "$@"; }
+	else
+		echo "$sites is not writable by the ssh user; give it write access or run with sudo" >&2
+		exit 5
+	fi
+}
+
+if [ "$absent" = no ]; then
+	if as_deploy test -L "$apps" || as_deploy test -L "$dir"; then
+		echo "$dir is a symlink; refusing" >&2
+		exit 4
+	fi
+	as_deploy test -d "$dir" || absent=yes
+fi
+if [ "$absent" = yes ]; then
+	if [ "$action" = run ]; then remove_key_line; fi
 	echo "VAUBAN_PROJECT_ABSENT"
 	exit 0
 fi
@@ -96,9 +148,18 @@ if [ "$(lc "$cur")" != "$(lc "$slug")" ]; then
 	exit 3
 fi
 
+file=""
+if [ "$sites" != - ] && [ "$container" != - ]; then
+	file="$sites/$project.caddy"
+fi
+
 if [ "$action" = plan ]; then
+	# fail before anything is stopped: a site file we cannot remove.
+	if [ -n "$file" ] && { as_deploy test -e "$file" || as_deploy test -L "$file"; }; then
+		pick_writer
+	fi
 	if [ "$purge" = yes ] && as_deploy test -f "$compose"; then
-		if ! vols=$(as_deploy docker compose -p "$cproject" --project-directory "$dir" -f "$compose" config --volumes 2>/dev/null); then
+		if ! vols=$(dc config --volumes 2>/dev/null); then
 			echo "VAUBAN_VOLUMES_UNKNOWN"
 			exit 0
 		fi
@@ -116,9 +177,9 @@ fi
 # 1. containers (and volumes with purge) of this project only.
 if as_deploy test -f "$compose"; then
 	if [ "$purge" = yes ]; then
-		as_deploy docker compose -p "$cproject" --project-directory "$dir" -f "$compose" down -v
+		dc down -v
 	else
-		as_deploy docker compose -p "$cproject" --project-directory "$dir" -f "$compose" down
+		dc down
 	fi
 else
 	echo "no compose.yaml: nothing to bring down"
@@ -126,18 +187,10 @@ fi
 
 # 2. the site file, only when vauban recorded it.
 reload=no
-if [ "$sites" != - ] && [ "$container" != - ]; then
-	file="$sites/$project.caddy"
+if [ -n "$file" ]; then
 	bak="$sites/.vauban-$project.bak"
 	hold="$sites/.vauban-$project.destroy"
-	if as_deploy test -w "$sites"; then
-		writer() { as_deploy "$@"; }
-	elif [ "$mode" = sudo ]; then
-		writer() { $SUDO "$@"; }
-	else
-		echo "$sites is not writable by the ssh user; give it write access or run with sudo" >&2
-		exit 5
-	fi
+	pick_writer
 	if as_deploy test -e "$dir/.vauban-site"; then reload=yes; fi
 	if writer test -L "$file" || writer test -d "$file"; then
 		echo "VAUBAN_SITE_FOREIGN"
@@ -167,30 +220,16 @@ if [ "$sites" != - ] && [ "$container" != - ]; then
 	fi
 fi
 
-# 3. the project dir (the symlink check above ran as deploy on this path).
+# 3. the project dir: the marker goes last, so a partial removal keeps the
+# project provably ours for a rerun.
 if as_deploy test -L "$dir"; then
 	echo "$dir is a symlink; refusing" >&2
 	exit 4
 fi
-as_deploy rm -rf -- "$dir"
+as_deploy find "$dir" -mindepth 1 -maxdepth 1 ! -name .vauban-owner -exec rm -rf -- {} +
+as_deploy rm -f -- "$marker"
+as_deploy rmdir -- "$dir"
 
 # 4. last: the authorized_keys line of this project (this revokes its key).
-as_deploy sh -s -- "$home" "$project" <<'INNER'
-set -eu
-umask 077
-home=$1
-project=$2
-ak="$home/.ssh/authorized_keys"
-if [ ! -f "$ak" ]; then
-	exit 0
-fi
-tmp=$(mktemp "$home/.ssh/.vauban-ak.XXXXXX")
-trap 'rm -f "$tmp"' EXIT INT TERM
-awk -v s=" # vauban:$project" '{ n = length($0) - length(s) + 1; if (n >= 1 && substr($0, n) == s) next; print }' "$ak" >"$tmp"
-chmod 600 "$tmp"
-if cmp -s "$tmp" "$ak"; then
-	exit 0
-fi
-mv -f "$tmp" "$ak"
-INNER
+remove_key_line
 echo "project removed"

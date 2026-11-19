@@ -364,8 +364,24 @@ func TestDestroyScriptShape(t *testing.T) {
 			t.Errorf("destroy script contains %q", bad)
 		}
 	}
-	down, dir, keys := strings.Index(s, "down -v"), strings.Index(s, `rm -rf -- "$dir"`), strings.LastIndex(s, "authorized_keys")
+	down, dir, keys := strings.Index(s, "down -v"), strings.Index(s, `rmdir -- "$dir"`), strings.LastIndex(s, "authorized_keys")
 	if down < 0 || dir < down || keys < dir {
 		t.Errorf("order wrong: down %d, rm dir %d, authorized_keys %d", down, dir, keys)
+	}
+}
+
+func TestDestroyScriptComposePlaceholders(t *testing.T) {
+	s := DestroyScript()
+	if !strings.Contains(s, "env IMAGE_TAG=destroy APP_PORT=1 docker compose") {
+		t.Error("compose calls lack the IMAGE_TAG/APP_PORT placeholders")
+	}
+	if strings.Count(s, "docker compose") != 1 {
+		t.Errorf("compose is invoked outside the dc helper")
+	}
+	if !strings.Contains(s, "as_deploy true ||") {
+		t.Error("no act-as-deploy check")
+	}
+	if i, j := strings.Index(s, `rm -f -- "$marker"`), strings.Index(s, `rmdir -- "$dir"`); i < 0 || j < i || !strings.Contains(s, "! -name .vauban-owner") {
+		t.Error("project dir must be emptied, then the marker removed, then the dir")
 	}
 }

@@ -207,8 +207,8 @@ func TestDestroyExistingProjectAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destroy: %v\n%s", err, out)
 	}
-	if f.ranRun {
-		t.Error("run called for an absent project")
+	if !f.ranRun {
+		t.Error("run not called: a leftover authorized_keys line would stay")
 	}
 	if !strings.Contains(out, "nothing on the server to remove") {
 		t.Errorf("missing notice:\n%s", out)
@@ -248,7 +248,7 @@ func TestDestroyExistingNoOutputsAuditSaysAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destroy: %v\n%s", err, out)
 	}
-	if f.ranRun || !strings.Contains(out, "nothing on the server to remove") {
+	if !f.ranRun || !strings.Contains(out, "nothing on the server to remove") {
 		t.Errorf("ranRun=%v out:\n%s", f.ranRun, out)
 	}
 }
@@ -290,5 +290,60 @@ func TestDestroyPurgeNeedsExisting(t *testing.T) {
 	wantExit(t, err, 2, "", out)
 	if len(fr.Calls) != 0 {
 		t.Errorf("calls: %q", callLines(fr))
+	}
+}
+
+func TestDestroyExistingNoSudoIsNotAbsent(t *testing.T) {
+	root, f := existingDestroyEnv(t)
+	f.planOut, f.planErr = "", errors.New("exit status 5: cannot act as deploy (sudo -n runuser failed)")
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	wantExit(t, err, 1, "", out)
+	if !strings.Contains(err.Error(), "cannot act as the deploy user") || strings.Contains(out, "nothing on the server to remove") {
+		t.Errorf("err = %v\n%s", err, out)
+	}
+	if f.ranRun || len(f.secrets()) != 0 || !exists(statePath(root)) {
+		t.Error("something was done")
+	}
+	// the same failure during run
+	root, f = existingDestroyEnv(t)
+	f.runErr = errors.New("exit status 5: cannot act as deploy (sudo -n runuser failed)")
+	out, err = execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	wantExit(t, err, 1, "", out)
+	if !strings.Contains(err.Error(), "cannot act as the deploy user") {
+		t.Errorf("run err = %v", err)
+	}
+}
+
+func TestDestroyExistingMissingMarkerMessage(t *testing.T) {
+	root, f := existingDestroyEnv(t)
+	f.planOut, f.planErr = "VAUBAN_OWNER_CONFLICT -\n", errors.New("exit status 3")
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	wantExit(t, err, 1, "", out)
+	if !strings.Contains(err.Error(), "no .vauban-owner marker") || strings.Contains(err.Error(), "belongs to -") {
+		t.Errorf("err = %v", err)
+	}
+	// the run-time race gives the same message
+	root, f = existingDestroyEnv(t)
+	f.runOut, f.runErr = "VAUBAN_OWNER_CONFLICT -\n", errors.New("exit status 3")
+	_, err = execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	if err == nil || !strings.Contains(err.Error(), "no .vauban-owner marker") {
+		t.Errorf("run err = %v", err)
+	}
+}
+
+func TestDestroyExistingUnknownSitesWarns(t *testing.T) {
+	root, f := existingDestroyEnv(t)
+	saveState(t, root, &engine.State{Done: map[string]bool{}, Outputs: engine.Outputs{}})
+	b, _ := os.ReadFile("../remote/testdata/audit-nginx.txt")
+	f.auditOut = string(b)
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
+	if err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	if got := scriptArgs(f.call("run")); got[2] != "-" || got[5] != "-" {
+		t.Fatalf("run args = %q", got)
+	}
+	if !strings.Contains(out, "sites dir was unknown") {
+		t.Errorf("no warning:\n%s", out)
 	}
 }

@@ -895,3 +895,35 @@ func TestDomainStepOutputsPort(t *testing.T) {
 		t.Errorf("cloud out has deployed_port: %v", out)
 	}
 }
+
+// TestExistingComposeConfigWithPlaceholders runs docker compose config (no
+// daemon needed) on the rendered existing-mode compose file with the
+// placeholders destroy passes: without them it fails on ${IMAGE_TAG:?}.
+func TestExistingComposeConfigWithPlaceholders(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not installed")
+	}
+	if err := exec.Command("docker", "compose", "version").Run(); err != nil {
+		t.Skip("docker compose not available")
+	}
+	golden := filepath.Join("..", "..", "..", "testdata", "golden", "deploy", "existing-compose.yaml")
+	abs, err := filepath.Abs(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(env ...string) error {
+		cmd := exec.Command("docker", "compose", "-p", "vauban-x", "--project-directory", dir, "-f", abs, "config", "--volumes")
+		cmd.Env = append(os.Environ(), env...)
+		return cmd.Run()
+	}
+	if err := run("IMAGE_TAG=", "APP_PORT="); err == nil {
+		t.Error("config without placeholders succeeded; the test proves nothing")
+	}
+	if err := run("IMAGE_TAG=destroy", "APP_PORT=1"); err != nil {
+		t.Errorf("config with placeholders: %v", err)
+	}
+}

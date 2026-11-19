@@ -117,23 +117,22 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 
 	// Read-only: prove the project is ours and list what --purge would delete.
 	var volumes []string
-	volumesKnown := true
-	if !absent {
+	var volumesKnown bool
+	{
 		out, err := remote.Exec(ctx, run, t, server.DestroyScript(), script("plan")...)
 		if other, ok := ownerConflict(out); ok && err != nil {
-			why := fmt.Sprintf("project %q on %s belongs to %s, not %s", c.Project, t.Host, other, repo)
-			if other == "-" {
-				why = fmt.Sprintf("~deploy/apps/%s on %s has no .vauban-owner marker, so it is not %s's", c.Project, t.Host, repo)
-			}
-			return &ExitError{Code: 1, Err: fmt.Errorf("%s: refusing to destroy it — nothing was destroyed", why)}
+			return &ExitError{Code: 1, Err: fmt.Errorf("%w: refusing to destroy it — nothing was destroyed", conflictErr(other, c.Project, t.Host, repo))}
 		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return &ExitError{Code: 130, Err: errDestroyInterrupted}
 			}
+			if strings.Contains(err.Error(), "cannot act as deploy") {
+				return &ExitError{Code: 1, Err: fmt.Errorf("cannot act as the deploy user on %s: ssh as deploy, or give the ssh user passwordless sudo (sudo -n runuser failed) — nothing was destroyed", t.Host)}
+			}
 			return &ExitError{Code: 1, Err: fmt.Errorf("cannot check %s@%s — nothing was destroyed: %w", t.User, t.Host, err)}
 		}
-		absent = hasMarker(out, markAbsent)
+		absent = absent || hasMarker(out, markAbsent)
 		volumesKnown = !hasMarker(out, markUnknown)
 		for _, l := range strings.Split(string(out), "\n") {
 			if v, ok := strings.CutPrefix(strings.TrimSpace(l), markVolume); ok {
@@ -146,7 +145,7 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "destroy will:")
 	if absent {
-		fmt.Fprintf(w, "  - nothing on the server to remove: ~deploy/apps/%s does not exist on %s\n", c.Project, t.Host)
+		fmt.Fprintf(w, "  - nothing on the server to remove but a leftover \"# vauban:%s\" line in ~deploy/.ssh/authorized_keys: ~deploy/apps/%s does not exist on %s\n", c.Project, c.Project, t.Host)
 	} else {
 		down := "down"
 		if purge {
@@ -155,6 +154,8 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 		fmt.Fprintf(w, "  - on %s@%s: $ docker compose -p vauban-%s -f ~deploy/apps/%s/compose.yaml %s\n", t.User, t.Host, c.Project, c.Project, down)
 		if sites != "-" {
 			fmt.Fprintf(w, "  - remove %s/%s.caddy if vauban wrote it, then validate and reload %s (a failed validate restores it)\n", sites, c.Project, container)
+		} else {
+			ui.Warning(w, "the Caddy sites dir is unknown: a site file for "+c.Project+" may remain on the server")
 		}
 		fmt.Fprintf(w, "  - remove ~deploy/apps/%s (only because its .vauban-owner is %s)\n", c.Project, repo)
 		fmt.Fprintf(w, "  - remove the \"# vauban:%s\" line from ~deploy/.ssh/authorized_keys (last: it revokes the deploy key)\n", c.Project)
@@ -209,7 +210,7 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 		}
 		return err
 	}
-	if !absent {
+	{
 		const id, desc = "server:destroy", "remove the project from the server (ssh)"
 		prog.Update(id, desc, engine.PhaseStart, nil)
 		out, err := remote.Exec(ctx, run, t, server.DestroyScript(), script("run")...)
@@ -221,6 +222,9 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 		prog.Pause()
 		if hasMarker(out, markAbsent) {
 			fmt.Fprintf(w, "nothing on the server to remove: ~deploy/apps/%s does not exist\n", c.Project)
+		}
+		if sites == "-" {
+			ui.Warning(w, "the Caddy sites dir was unknown: a site file for "+c.Project+" may remain on the server")
 		}
 		if hasMarker(out, markForeign) {
 			ui.Warning(w, fmt.Sprintf("%s/%s.caddy was not written by vauban: left in place", sites, c.Project))
@@ -243,11 +247,22 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 	return nil
 }
 
+// conflictErr says why a project dir is not ours ("-" means no marker).
+func conflictErr(other, project, host, repo string) error {
+	if other == "-" {
+		return fmt.Errorf("~deploy/apps/%s on %s has no .vauban-owner marker, so it is not %s's", project, host, repo)
+	}
+	return fmt.Errorf("project %q on %s belongs to %s, not %s", project, host, other, repo)
+}
+
 // runFailure explains a failed remove run: nothing local was changed, and a
 // rerun finishes what is left.
 func runFailure(out []byte, err error, project, repo, host string) error {
 	if other, ok := ownerConflict(out); ok {
-		return &ExitError{Code: 1, Err: fmt.Errorf("project %q on %s belongs to %s, not %s: nothing was destroyed", project, host, other, repo)}
+		return &ExitError{Code: 1, Err: fmt.Errorf("%w: nothing was destroyed", conflictErr(other, project, host, repo))}
+	}
+	if strings.Contains(err.Error(), "cannot act as deploy") {
+		return &ExitError{Code: 1, Err: fmt.Errorf("cannot act as the deploy user on %s: ssh as deploy, or give the ssh user passwordless sudo (sudo -n runuser failed)", host)}
 	}
 	return &ExitError{Code: 1, Err: fmt.Errorf("removing the project from %s failed — secrets and state left untouched, rerun `vauban destroy` to finish: %w", host, err)}
 }
