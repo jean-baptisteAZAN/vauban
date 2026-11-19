@@ -3,6 +3,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,17 +49,34 @@ func (t Target) As(user, key string) Target {
 	return t
 }
 
-// Pinned reports whether a host key has been recorded.
-func Pinned(t Target) bool {
+// knownHostsName is how ssh records t in known_hosts: the host (lowercased,
+// as ssh does), in brackets with the port unless the port is 22.
+func (t Target) knownHostsName() string {
+	h := strings.ToLower(t.Host)
+	if t.Port == 22 || t.Port == 0 {
+		return h
+	}
+	return "[" + h + "]:" + strconv.Itoa(t.Port)
+}
+
+// Pinned reports whether known_hosts already holds a key for this host and
+// port (ssh-keygen -F, through r). A key pinned for another server does not
+// count: a new host is accepted on first connect, a known one must match.
+func Pinned(ctx context.Context, r engine.Runner, t Target) bool {
 	fi, err := os.Stat(t.KnownHosts)
-	return err == nil && fi.Size() > 0
+	if err != nil || fi.Size() == 0 {
+		return false
+	}
+	out, err := r.Run(ctx, engine.Cmd{Name: "ssh-keygen", Args: []string{"-F", t.knownHostsName(), "-f", t.KnownHosts}})
+	return err == nil && len(bytes.TrimSpace(out)) > 0
 }
 
 // Cmd builds the ssh command running script (on stdin) with sh -s and args,
 // each POSIX single-quoted because ssh joins remote args into one shell string.
-func (t Target) Cmd(script string, args ...string) engine.Cmd {
+// pinned (see Pinned) makes ssh require the recorded host key.
+func (t Target) Cmd(pinned bool, script string, args ...string) engine.Cmd {
 	policy := "accept-new"
-	if Pinned(t) {
+	if pinned {
 		policy = "yes"
 	}
 	a := []string{"-p", strconv.Itoa(t.Port),
@@ -82,7 +100,7 @@ func quote(s string) string {
 
 // Exec runs script on the target and returns its stdout.
 func Exec(ctx context.Context, r engine.Runner, t Target, script string, args ...string) ([]byte, error) {
-	out, err := r.Run(ctx, t.Cmd(script, args...))
+	out, err := r.Run(ctx, t.Cmd(Pinned(ctx, r, t), script, args...))
 	if err != nil && strings.Contains(err.Error(), "REMOTE HOST IDENTIFICATION HAS CHANGED") {
 		return out, fmt.Errorf("%w for %s; if expected, remove the line from .vauban/known_hosts: %w",
 			ErrHostKeyChanged, t.Host, err)
