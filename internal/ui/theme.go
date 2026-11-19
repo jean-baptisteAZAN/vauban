@@ -40,3 +40,15 @@ func Mark(status string) string {
 	}
 	return "[" + status + "]"
 }
+
+func auditStyle(status string) lipgloss.Style {
+	switch status {
+	case "ok":
+		return OK
+	case "missing", "warn":
+		return Warn
+	case "blocked":
+		return Err
+	}
+	return Muted
+}
