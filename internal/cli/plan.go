@@ -337,10 +337,13 @@ func preparePlan(root string, c *config.Config, force bool) (*planned, error) {
 		// The server may be replaced: re-read its IP after infra:output.
 		stale = append(stale, deploy.ServerSteps()...)
 	}
-	if site := server.StaleSteps(pl.st, c); len(site) > 0 {
-		// A new domain or app port: rewrite the site and the deploy secrets.
-		pl.siteStale = cmp.Or(pl.st.Outputs["server_site"], "unrecorded")
-		stale = slices.Concat(stale, site, deploy.ExistingServerSteps())
+	for _, id := range server.StaleSteps(pl.st, c) {
+		stale = append(stale, id)
+		if id == "server:site" {
+			// A new domain or app port: rewrite the site and the deploy secrets.
+			pl.siteStale = cmp.Or(pl.st.Outputs["server_site"], "unrecorded")
+			stale = append(stale, deploy.ExistingServerSteps()...)
+		}
 	}
 	for _, id := range stale {
 		delete(pl.st.Done, id)

@@ -82,7 +82,7 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	if c.Existing() {
 		return runDestroyExisting(cmd, root, c, st, p, purge)
 	}
-	if applied := server.AppliedTarget(st); applied != "" {
+	if _, applied, ok := server.AppliedServer(st); ok {
 		return &ExitError{Code: 1, Err: fmt.Errorf("this project is deployed on %s (target: existing) but vauban.yaml says target: cloud: set target: existing and its server: block back in vauban.yaml, then run vauban destroy — nothing was destroyed", applied)}
 	}
 	managed := infra.IsManaged(root)

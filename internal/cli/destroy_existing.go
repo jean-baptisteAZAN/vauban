@@ -71,16 +71,15 @@ func runDestroyExisting(cmd *cobra.Command, root string, c *config.Config, st *e
 		return errors.New("target existing needs a server: block")
 	}
 	w := cmd.OutOrStdout()
-	// The server the project is deployed on, which vauban.yaml may no longer
-	// name (edited by hand); the key still comes from vauban.yaml.
+	// The server the project is deployed on (host and port), which vauban.yaml
+	// may no longer name (edited by hand); the ssh user and key come from
+	// vauban.yaml, since they may have changed (root ssh turned off, say).
 	srv := *c.Server
-	if applied := server.AppliedTarget(st); applied != "" {
-		if rec, ok := server.ParseTarget(applied); ok {
-			if want := server.TargetString(srv.User, srv.Host, srv.SSHPort()); want != applied {
-				ui.Warning(w, fmt.Sprintf("vauban.yaml names %s but this project is deployed on %s: destroying it there", want, applied))
-			}
-			srv.User, srv.Host, srv.Port = rec.User, rec.Host, rec.Port
+	if rec, applied, ok := server.AppliedServer(st); ok {
+		if want := server.HostPort(srv.Host, srv.SSHPort()); want != applied {
+			ui.Warning(w, fmt.Sprintf("vauban.yaml names %s but this project is deployed on %s: destroying it there", want, applied))
 		}
+		srv.Host, srv.Port = rec.Host, rec.Port
 	}
 	t, err := remote.TargetFor(root, &srv)
 	if err != nil {

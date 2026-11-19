@@ -79,8 +79,20 @@ func TestCheckTarget(t *testing.T) {
 	moved := cfg(config.TargetExisting)
 	moved.Server.Host = "198.51.100.1"
 	err := CheckTarget(applied, moved)
-	if err == nil || !strings.Contains(err.Error(), "deployed on ops@203.0.113.10:2222") || !strings.Contains(err.Error(), "vauban destroy") {
+	if err == nil || !strings.Contains(err.Error(), "deployed on 203.0.113.10:2222") || !strings.Contains(err.Error(), "vauban destroy") {
 		t.Fatalf("host change: %v", err)
+	}
+	// the server is its host and port: another ssh user (root ssh turned
+	// off, say) or key on the same host is allowed.
+	user := cfg(config.TargetExisting)
+	user.Server.User, user.Server.Key = "admin", "~/.ssh/other"
+	if err := CheckTarget(applied, user); err != nil {
+		t.Fatalf("user change: %v", err)
+	}
+	port := cfg(config.TargetExisting)
+	port.Server.Port = 22
+	if err := CheckTarget(applied, port); err == nil {
+		t.Fatal("port change must be refused")
 	}
 	cloud := cfg(config.TargetCloud)
 	if err := CheckTarget(applied, cloud); err == nil || !strings.Contains(err.Error(), "existing → cloud") {
@@ -134,5 +146,20 @@ func TestScriptsCompareSlugCaseInsensitively(t *testing.T) {
 	}
 	if !strings.Contains(destroyScript, `[ "$(lc "$cur")" != "$(lc "$slug")" ]`) {
 		t.Error("destroy script compares the owner case-sensitively")
+	}
+}
+
+// A new ssh user re-reads the facts (user, sudo) with server:audit; the
+// other server steps stay done.
+func TestStaleStepsUserChange(t *testing.T) {
+	c := cfg(config.TargetExisting)
+	st := &engine.State{Done: map[string]bool{"server:audit": true, "server:site": true},
+		Outputs: engine.Outputs{"server_target": "root@203.0.113.10:2222", "server_site": SiteFingerprint(c)}}
+	if got := StaleSteps(st, c); len(got) != 1 || got[0] != "server:audit" {
+		t.Fatalf("user change: %v", got)
+	}
+	st.Outputs["server_target"] = "ops@203.0.113.10:2222"
+	if got := StaleSteps(st, c); got != nil {
+		t.Fatalf("same user: %v", got)
 	}
 }

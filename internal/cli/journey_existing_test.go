@@ -202,7 +202,6 @@ func TestExistingHostChangeRefused(t *testing.T) {
 	for _, args := range [][]string{
 		{"--host", "198.51.100.1"},
 		{"--ssh-port", "2222"},
-		{"--ssh-user", "root"},
 	} {
 		t.Run(args[0], func(t *testing.T) {
 			root, f := appliedExisting(t)
@@ -213,7 +212,7 @@ func TestExistingHostChangeRefused(t *testing.T) {
 				if err == nil {
 					t.Fatalf("%s: want refusal\n%s", cmd, out)
 				}
-				for _, want := range []string{"deployed on jb@203.0.113.10:22", "migrating between servers is not supported", "vauban destroy"} {
+				for _, want := range []string{"deployed on 203.0.113.10:22", "migrating between servers is not supported", "vauban destroy"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("%s: error %q lacks %q", cmd, err, want)
 					}
@@ -278,7 +277,7 @@ func TestExistingDestroyUsesRecordedTarget(t *testing.T) {
 			t.Errorf("ssh to %s, want jb@203.0.113.10", d)
 		}
 	}
-	if !strings.Contains(out, "198.51.100.1") || !strings.Contains(out, "jb@203.0.113.10:22") {
+	if !strings.Contains(out, "198.51.100.1") || !strings.Contains(out, "deployed on 203.0.113.10:22") {
 		t.Errorf("destroy must say which server it uses:\n%s", out)
 	}
 }
@@ -287,7 +286,7 @@ func TestDestroyCloudConfigOnExistingStateRefused(t *testing.T) {
 	root, f := appliedExisting(t)
 	writeFile(t, root, config.FileName, "project: shop\ncloud: hetzner\napp_port: 8080\n")
 	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop")
-	if err == nil || !strings.Contains(err.Error(), "deployed on jb@203.0.113.10:22") {
+	if err == nil || !strings.Contains(err.Error(), "deployed on 203.0.113.10:22") {
 		t.Fatalf("want refusal, got %v\n%s", err, out)
 	}
 	if len(f.calls) != 0 || !exists(statePath(root)) {
@@ -389,5 +388,55 @@ func TestExistingKnownHostsChangeResetsSecret(t *testing.T) {
 	}
 	if got := f.secretsSet(); !slices.Equal(got, []string{"DEPLOY_KNOWN_HOSTS"}) {
 		t.Errorf("secrets set = %q", got)
+	}
+}
+
+// First applied as root, then root ssh is turned off: a new ssh user on the
+// same host and port is allowed and re-runs only the audit.
+func TestExistingUserChangeAllowed(t *testing.T) {
+	root, f := appliedExisting(t)
+	out, err := execPlan(t, root, "--ssh-user", "admin")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "+ audit admin@203.0.113.10 over ssh (read-only)\n") ||
+		!strings.Contains(out, "✓ create ~deploy/apps/shop with an owner marker on 203.0.113.10 (done)") {
+		t.Errorf("want only the audit pending:\n%s", out)
+	}
+	f.reset()
+	if out, err := execVauban(t, context.Background(), "apply", "--dir", root, "--yes"); err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	for _, d := range f.destinations() {
+		if d != "admin@203.0.113.10" {
+			t.Errorf("ssh to %s", d)
+		}
+	}
+	if got := f.siteWrites(t); len(got) != 0 {
+		t.Errorf("site rewritten: %q", got)
+	}
+	st, _ := engine.LoadState(root)
+	if got := st.Outputs["server_target"]; got != "admin@203.0.113.10:22" {
+		t.Errorf("server_target = %q", got)
+	}
+}
+
+// destroy keeps the recorded host and port but connects as vauban.yaml's
+// user (a hand edit, not applied yet).
+func TestExistingDestroyUsesConfigUser(t *testing.T) {
+	root, f := appliedExisting(t)
+	y, _ := os.ReadFile(filepath.Join(root, config.FileName))
+	writeFile(t, root, config.FileName, strings.Replace(string(y), "user: jb", "user: admin", 1))
+	if out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", "shop"); err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	dests := f.destinations()
+	if len(dests) == 0 {
+		t.Fatal("no ssh call")
+	}
+	for _, d := range dests {
+		if d != "admin@203.0.113.10" {
+			t.Errorf("ssh to %s, want admin@203.0.113.10", d)
+		}
 	}
 }
