@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -29,6 +30,9 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	c, err := config.Load(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &ExitError{Code: 2, Err: fmt.Errorf("no %s in %s: run vauban plan and choose \"Use an existing server\" first", config.FileName, root)}
+	}
 	if err != nil {
 		return err
 	}

@@ -61,8 +61,14 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	c, err := config.Load(root)
+	orphan := false
 	if errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("no %s in %s: nothing to destroy", config.FileName, root)
+		// A cloud apply that stopped before vauban.yaml was saved still left
+		// a managed main.tf naming the cloud: destroy from it.
+		if !infra.IsManaged(root) || infra.RenderedFingerprint(root) == "" {
+			return fmt.Errorf("no %s in %s: nothing to destroy", config.FileName, root)
+		}
+		c, err, orphan = &config.Config{}, nil, true
 	}
 	if err != nil {
 		return err
@@ -78,6 +84,9 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	p, err := detect.Scan(root)
 	if err != nil {
 		return err
+	}
+	if orphan {
+		c.Project = p.Name
 	}
 	if c.Existing() {
 		return runDestroyExisting(cmd, root, c, st, p, purge)
@@ -108,6 +117,9 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	}
 	ui.Heading(w, c.Project)
 	fmt.Fprintln(w)
+	if orphan {
+		fmt.Fprintf(w, "no %s: project name from the directory, cloud from infra/main.tf\n\n", config.FileName)
+	}
 	fmt.Fprintln(w, "destroy will:")
 	if managed {
 		if initArgs != nil {

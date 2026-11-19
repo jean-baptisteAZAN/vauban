@@ -165,6 +165,33 @@ func TestDestroyWithoutConfig(t *testing.T) {
 	}
 }
 
+// A cloud apply that failed before vauban.yaml was saved (v0.1.0) leaves
+// real resources behind: destroy still works, from the managed main.tf, with
+// the directory name as the project name.
+func TestDestroyWithoutConfigUsesManagedInfra(t *testing.T) {
+	root, fr := destroyEnv(t)
+	if err := os.Remove(filepath.Join(root, config.FileName)); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Base(root)
+	out, err := execVauban(t, context.Background(), "destroy", "--dir", root, "--confirm", strings.ToLower(name))
+	if err != nil {
+		t.Fatalf("destroy: %v\n%s", err, out)
+	}
+	if got := callLines(fr); len(got) == 0 || got[0] != tofuDestroyCmd {
+		t.Fatalf("calls = %q", got)
+	}
+	if !slices.Contains(fr.Calls[0].Env, "HCLOUD_TOKEN="+planToken) || !strings.Contains(out, "no vauban.yaml") {
+		t.Errorf("env %q, output:\n%s", fr.Calls[0].Env, out)
+	}
+	if exists(statePath(root)) {
+		t.Error("state.json not removed")
+	}
+	if exists(filepath.Join(root, config.FileName)) {
+		t.Error("vauban.yaml created")
+	}
+}
+
 func TestDestroyPreflightMissingGh(t *testing.T) {
 	root, fr := destroyEnv(t)
 	bin := t.TempDir()
