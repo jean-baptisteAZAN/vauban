@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -126,6 +127,27 @@ func sshKeyChoices() ([]ui.Choice, error) {
 		}
 	}
 	return out, nil
+}
+
+// privateSuffixes are name suffixes only a local network resolves.
+var privateSuffixes = []string{".local", ".lan", ".home", ".internal", ".localdomain", ".localhost"}
+
+// hostWarning warns when host is neither an IP address nor a public DNS name
+// (an ~/.ssh/config alias, a bare or LAN name): GitHub Actions deploys to
+// DEPLOY_HOST and cannot resolve those. "" when host looks reachable.
+func hostWarning(host string) string {
+	if net.ParseIP(host) != nil {
+		return ""
+	}
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	private := !strings.Contains(h, ".") || h == "localhost"
+	for _, s := range privateSuffixes {
+		private = private || strings.HasSuffix(h, s)
+	}
+	if !private {
+		return ""
+	}
+	return host + " is not an IP address or a public DNS name: GitHub Actions must reach this host by name (DEPLOY_HOST); use its public IP or DNS name"
 }
 
 // writeAudit runs the audit once (plan, and apply before its prompt): it

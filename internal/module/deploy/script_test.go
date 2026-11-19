@@ -216,3 +216,21 @@ func TestExistingDeployOwnerCaseInsensitive(t *testing.T) {
 		t.Fatalf("another owner must stop the deploy: %v\n%s", err, out)
 	}
 }
+
+// scp needs an IPv6 host in brackets (ssh takes it bare).
+func TestExistingDeployIPv6Target(t *testing.T) {
+	for host, want := range map[string]string{
+		"2001:db8::1":     "deploy@[2001:db8::1]:apps/widget/",
+		"203.0.113.7":     "deploy@203.0.113.7:apps/widget/",
+		"srv.example.com": "deploy@srv.example.com:apps/widget/",
+	} {
+		out, scp, err := existingDeployRun(t, "acme/widget", "REPO=acme/widget", "DEPLOY_HOST="+host)
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", host, err, out)
+		}
+		lines := strings.Split(strings.TrimSpace(scp), "\n")
+		if got := lines[len(lines)-1]; got != want {
+			t.Errorf("%s: scp target %q, want %q", host, got, want)
+		}
+	}
+}

@@ -104,6 +104,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		// Caddy change stop here, before any change. The server:audit step
 		// runs it again on a first apply (its outputs feed the other steps).
 		fmt.Fprintln(w)
+		if hw := hostWarning(c.Server.Host); hw != "" {
+			ui.Warning(w, hw)
+		}
 		lines, stop := writeAudit(ctx, w, root, p.GitHubRepo, c)
 		if stop {
 			ui.Warnings(w, "cannot apply:", lines)

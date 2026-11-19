@@ -97,7 +97,10 @@ jobs:
             printf '~/apps/%s belongs to another repository\n' "$project" >&2
             exit 1
           }
-          scp "${ssh_opts[@]}" -P "$DEPLOY_PORT" deploy/compose.yaml .env "deploy@$DEPLOY_HOST:apps/$project/"
+          # scp needs an IPv6 address in brackets.
+          scp_host=$DEPLOY_HOST
+          case $DEPLOY_HOST in *:*) scp_host="[$DEPLOY_HOST]" ;; esac
+          scp "${ssh_opts[@]}" -P "$DEPLOY_PORT" deploy/compose.yaml .env "deploy@$scp_host:apps/$project/"
           # The registry token goes over stdin, never on a command line, into a
           # throwaway docker config removed on exit: it never persists remotely.
           remote=$(printf 'cd ~/apps/%q' "$project")

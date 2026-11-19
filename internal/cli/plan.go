@@ -104,6 +104,11 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	}
 	notices, err := engine.Preflight(pl.p, c, pl.mods, pl.preflightOptions(root, c))
 	lines := auditLines
+	if c.Existing() && c.Server != nil {
+		if hw := hostWarning(c.Server.Host); hw != "" {
+			lines = append(lines, hw)
+		}
+	}
 	if err != nil {
 		lines = append(lines, strings.Split(err.Error(), "\n")...)
 	}

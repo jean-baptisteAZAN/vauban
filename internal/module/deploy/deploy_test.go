@@ -718,7 +718,7 @@ func TestExistingWorkflow(t *testing.T) {
 		for _, want := range []string{
 			"StrictHostKeyChecking=yes", `-p "$DEPLOY_PORT"`, `-P "$DEPLOY_PORT"`,
 			"DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}", "~/.ssh/known_hosts",
-			"project='widget'", `deploy/compose.yaml .env "deploy@$DEPLOY_HOST:apps/$project/"`,
+			"project='widget'", `deploy/compose.yaml .env "deploy@$scp_host:apps/$project/"`,
 			"test -d ~/apps/$project", "--password-stdin", "DOCKER_CONFIG=$(mktemp -d)",
 			"IMAGE_TAG=%q", `gh api "repos/$REPO/commits/main" --jq .sha`, "chmod 600 .env",
 			"docker compose pull && docker compose up -d --remove-orphans",
