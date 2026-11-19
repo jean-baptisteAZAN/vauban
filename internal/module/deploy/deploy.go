@@ -60,7 +60,7 @@ type data struct {
 	AppPort    string
 	CIWorkflow string // YAML-quoted workflow name; "" → trigger on push
 	SHA        string // expression for the built commit
-	Project    string // validated project name
+	Project    string // project name; safe for shell and YAML only when target is existing (validated)
 }
 
 func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) {
@@ -93,7 +93,10 @@ func (*Module) Plan(p *detect.Project, c *config.Config) ([]engine.Step, error) 
 			{workflowPath, "deploy-existing.yml"},
 		}
 	}
-	steps := []engine.Step{modeGuard{existing: c.Existing()}}
+	var steps []engine.Step
+	if g, conflict := conflictingMode(p.Root, c.Existing()); conflict {
+		steps = append(steps, g)
+	}
 	for _, f := range files {
 		b, err := render(f.tpl, d)
 		if err != nil {
@@ -122,9 +125,9 @@ const (
 	modeStepID      = "deploy:mode"
 )
 
-// modeGuard refuses to overwrite deploy files generated for the other target
-// unless Force is set. Files vauban did not generate are left to WriteFile.
-type modeGuard struct{ existing bool }
+// modeGuard is planned only when a deploy file was generated for the other
+// target (other); it fails unless Force is set.
+type modeGuard struct{ other string }
 
 func (modeGuard) ID() string       { return modeStepID }
 func (modeGuard) Describe() string { return "check deploy files match the target" }
@@ -133,8 +136,14 @@ func (g modeGuard) Apply(_ context.Context, env *engine.Env) (engine.Outputs, er
 	if env.Force {
 		return nil, nil
 	}
+	return nil, fmt.Errorf("deploy files were generated for target: %s; rerun with --force to regenerate", g.other)
+}
+
+// conflictingMode reports whether a deploy file under root was generated for
+// the other target. Files vauban did not generate are left to WriteFile.
+func conflictingMode(root string, existing bool) (modeGuard, bool) {
 	for _, path := range []string{composePath, workflowPath} {
-		b, err := os.ReadFile(filepath.Join(env.Root, filepath.FromSlash(path)))
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 		if err != nil {
 			continue
 		}
@@ -143,16 +152,16 @@ func (g modeGuard) Apply(_ context.Context, env *engine.Env) (engine.Outputs, er
 			continue
 		}
 		isExisting := strings.Contains(s, existingMarker)
-		if isExisting == g.existing {
+		if isExisting == existing {
 			continue
 		}
 		other := "existing" // the file's target
-		if g.existing {
+		if existing {
 			other = "cloud"
 		}
-		return nil, fmt.Errorf("deploy files were generated for target: %s; rerun with --force to regenerate", other)
+		return modeGuard{other: other}, true
 	}
-	return nil, nil
+	return modeGuard{}, false
 }
 
 func render(name string, d data) ([]byte, error) {

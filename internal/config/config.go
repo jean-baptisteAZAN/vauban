@@ -131,6 +131,9 @@ func (c *Config) validateCloud() []error {
 
 func (c *Config) validateExisting() []error {
 	var errs []error
+	if !existingProject.MatchString(c.Project) && c.Project != "" {
+		errs = append(errs, fmt.Errorf("project %q must match [a-z0-9][a-z0-9-]* (max 63 chars) when target is existing", c.Project))
+	}
 	if c.Domain == "" {
 		errs = append(errs, errors.New("domain is required when target is existing"))
 	}
@@ -163,6 +166,8 @@ func (c *Config) validateExisting() []error {
 	}
 	return errs
 }
+
+var existingProject = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 var userName = regexp.MustCompile(`^[a-z_][a-z0-9_-]*[$]?$`)
 

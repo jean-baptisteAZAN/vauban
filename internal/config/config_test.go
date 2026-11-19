@@ -236,3 +236,18 @@ func TestKeyPath(t *testing.T) {
 		t.Fatalf("abs: got %q, %v", got, err)
 	}
 }
+
+func TestExistingProjectName(t *testing.T) {
+	for name, ok := range map[string]bool{"shop-2": true, "a": true, "it's": false, "Shop": false, "a:b": false, "a\nb": false, "-x": false, "": false} {
+		c := &Config{Project: name, Target: TargetExisting, AppPort: 80, Domain: "a.example.com",
+			Server: &Server{Host: "1.2.3.4", User: "root", Key: "agent"}}
+		err := c.Validate()
+		if (err == nil) != ok {
+			t.Errorf("project %q: err = %v, want ok=%v", name, err, ok)
+		}
+	}
+	c := &Config{Project: "Shop", Cloud: "hetzner", AppPort: 80}
+	if err := c.Validate(); err != nil {
+		t.Errorf("cloud project unchanged: %v", err)
+	}
+}

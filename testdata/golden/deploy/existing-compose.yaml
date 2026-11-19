@@ -2,7 +2,7 @@
 # APP_PORT and IMAGE_TAG (the commit sha) come from the shell environment of
 # `docker compose` (set by the deploy workflow); app secrets from .env.
 # The shared Caddy reaches this app as widget-app on the vauban network.
-name: widget
+name: vauban-widget
 
 services:
   app:

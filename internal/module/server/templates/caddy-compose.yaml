@@ -1,4 +1,6 @@
 # Managed by vauban. Do not edit: vauban refuses to overwrite a changed file.
+name: vauban-caddy
+
 services:
   caddy:
     image: caddy:2

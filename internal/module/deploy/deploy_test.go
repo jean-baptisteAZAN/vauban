@@ -102,7 +102,7 @@ func TestPlanSteps(t *testing.T) {
 		ids = append(ids, s.ID())
 	}
 	want := []string{
-		"deploy:mode", "file:deploy/compose.yaml", "file:deploy/Caddyfile", "file:.github/workflows/deploy.yml",
+		"file:deploy/compose.yaml", "file:deploy/Caddyfile", "file:.github/workflows/deploy.yml",
 		"deploy:domain", "secret:DEPLOY_HOST", "secret:DEPLOY_SSH_KEY", "secret:DEPLOY_DOMAIN",
 	}
 	if !reflect.DeepEqual(ids, want) {
@@ -632,7 +632,7 @@ func TestExistingPlanSteps(t *testing.T) {
 		ids = append(ids, s.ID())
 	}
 	want := []string{
-		"deploy:mode", "file:deploy/compose.yaml", "file:.github/workflows/deploy.yml",
+		"file:deploy/compose.yaml", "file:.github/workflows/deploy.yml",
 		"deploy:domain", "secret:DEPLOY_HOST", "secret:DEPLOY_SSH_KEY", "secret:DEPLOY_DOMAIN",
 		"secret:DEPLOY_KNOWN_HOSTS", "secret:DEPLOY_PORT",
 	}
@@ -685,7 +685,7 @@ func TestExistingGoldenFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := c.Services["app"]
-	if len(c.Services) != 1 || c.Name != "widget" || app.Restart != "unless-stopped" || app.EnvFile != ".env" ||
+	if len(c.Services) != 1 || c.Name != "vauban-widget" || app.Restart != "unless-stopped" || app.EnvFile != ".env" ||
 		len(app.Ports) != 0 || app.Container != "" || app.Environment["PORT"] == "" ||
 		!strings.HasPrefix(app.Image, "ghcr.io/acme/widget:${IMAGE_TAG:?") ||
 		!reflect.DeepEqual(app.Networks["vauban"].Aliases, []string{"widget-app"}) || !c.Networks["vauban"].External {
@@ -739,13 +739,6 @@ func TestExistingWorkflow(t *testing.T) {
 }
 
 func TestModeGuard(t *testing.T) {
-	cloud := plan(t, goApp(t), cfg())
-	existing := plan(t, goApp(t), existingCfg())
-	run := func(t *testing.T, steps []engine.Step, root string, force bool) error {
-		t.Helper()
-		_, err := steps[0].Apply(context.Background(), &engine.Env{Root: root, Force: force})
-		return err
-	}
 	write := func(t *testing.T, root, path, content string) {
 		t.Helper()
 		full := filepath.Join(root, path)
@@ -756,38 +749,79 @@ func TestModeGuard(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// guardFor plans cfg against root and returns the deploy:mode step, if any.
+	guardFor := func(t *testing.T, root string, c *config.Config) engine.Step {
+		t.Helper()
+		p := goApp(t)
+		p.Root = root
+		for _, s := range plan(t, p, c) {
+			if s.ID() == "deploy:mode" {
+				return s
+			}
+		}
+		return nil
+	}
+	cloud := plan(t, goApp(t), cfg())
+	existing := plan(t, goApp(t), existingCfg())
+	apply := func(s engine.Step, root string, force bool) error {
+		_, err := s.Apply(context.Background(), &engine.Env{Root: root, Force: force})
+		return err
+	}
+	for _, c := range []*config.Config{cfg(), existingCfg()} {
+		if g := guardFor(t, t.TempDir(), c); g != nil {
+			t.Errorf("guard emitted for a clean repo (target %q)", c.Target)
+		}
+	}
 	for _, path := range []string{"deploy/compose.yaml", ".github/workflows/deploy.yml"} {
 		t.Run(path, func(t *testing.T) {
 			root := t.TempDir()
 			write(t, root, path, file(t, cloud, path))
-			err := run(t, existing, root, false)
-			if err == nil || err.Error() != "deploy files were generated for target: cloud; rerun with --force to regenerate" {
-				t.Errorf("cloud->existing err = %v", err)
+			if guardFor(t, root, cfg()) != nil {
+				t.Error("guard emitted for same mode (cloud)")
 			}
-			if err := run(t, existing, root, true); err != nil {
+			g := guardFor(t, root, existingCfg())
+			if g == nil {
+				t.Fatal("no guard for cloud->existing")
+			}
+			err := apply(g, root, false)
+			if err == nil || err.Error() != "deploy files were generated for target: cloud; rerun with --force to regenerate" {
+				t.Errorf("err = %v", err)
+			}
+			if err := apply(g, root, true); err != nil {
 				t.Errorf("force: %v", err)
 			}
-			if err := run(t, cloud, root, false); err != nil {
-				t.Errorf("same mode: %v", err)
-			}
+
 			root = t.TempDir()
 			write(t, root, path, file(t, existing, path))
-			err = run(t, cloud, root, false)
-			if err == nil || !strings.Contains(err.Error(), "generated for target: existing;") {
-				t.Errorf("existing->cloud err = %v", err)
+			if guardFor(t, root, existingCfg()) != nil {
+				t.Error("guard emitted for same mode (existing)")
 			}
-			if err := run(t, existing, root, false); err != nil {
-				t.Errorf("same mode: %v", err)
+			g = guardFor(t, root, cfg())
+			if g == nil {
+				t.Fatal("no guard for existing->cloud")
+			}
+			if err := apply(g, root, false); err == nil || !strings.Contains(err.Error(), "generated for target: existing;") {
+				t.Errorf("err = %v", err)
 			}
 		})
 	}
 	root := t.TempDir()
 	write(t, root, "deploy/compose.yaml", "services: {}\n")
-	if err := run(t, existing, root, false); err != nil {
-		t.Errorf("hand-written file: %v", err)
+	if guardFor(t, root, existingCfg()) != nil {
+		t.Error("guard emitted for a hand-written file")
 	}
-	if err := run(t, existing, t.TempDir(), false); err != nil {
-		t.Errorf("no files: %v", err)
+}
+
+func TestExistingWorkflowChecksOwnership(t *testing.T) {
+	got := file(t, plan(t, goApp(t), existingCfg()), ".github/workflows/deploy.yml")
+	for _, want := range []string{
+		"REPO: ${{ github.repository }}",
+		`grep -qxF -e \"$REPO\" ~/apps/$project/.vauban-owner`,
+		"belongs to another repository",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
 	}
 }
 
