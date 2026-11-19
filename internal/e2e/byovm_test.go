@@ -239,6 +239,50 @@ func TestBringYourOwnVM(t *testing.T) {
 	}
 	checkApplied()
 
+	// 3b. a new domain: plan clears server:site, apply rewrites the same file.
+	t.Log("3b. domain change")
+	const domain2 = "shop2.localhost"
+	st, err = engine.LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Outputs["server_target"] != server.TargetString("ops", "127.0.0.1", port) {
+		t.Fatalf("server_target = %q", st.Outputs["server_target"])
+	}
+	c2 := &config.Config{Project: project, Target: config.TargetExisting, Domain: domain2, AppPort: 8080, Server: srv}
+	stale := server.StaleSteps(st, c2)
+	if len(stale) != 1 || stale[0] != "server:site" {
+		t.Fatalf("stale = %v", stale)
+	}
+	for _, id := range stale {
+		delete(st.Done, id)
+	}
+	if err := st.Save(root); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = execute(t, ctx, root, steps(t, root, srv, project, slug, domain2), run); err != nil {
+		t.Fatalf("domain change: %v", err)
+	}
+	if st.Outputs["server_site"] != domain2+"|8080" {
+		t.Fatalf("server_site = %q", st.Outputs["server_site"])
+	}
+	h.mustEq(strings.TrimSpace(server.RenderSite(project, domain2, 8080)), `sudo -n cat `+sites+`/shop.caddy`)
+	h.mustEq("shop.caddy", `sudo -n ls `+sites)
+
+	// 3c. the repo slug in another case is still the owner.
+	t.Log("3c. slug case")
+	root4 := t.TempDir()
+	if err := os.CopyFS(filepath.Join(root4, ".vauban"), os.DirFS(filepath.Join(root, ".vauban"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root4, ".vauban", "state.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execute(t, ctx, root4, steps(t, root4, srv, project, "Acme/Shop", domain2), run); err != nil {
+		t.Fatalf("mixed-case slug: %v", err)
+	}
+	h.mustEq(slug, `sudo -n cat /home/deploy/apps/shop/.vauban-owner`)
+
 	// 4. a foreign site file is never overwritten.
 	t.Log("4. foreign site")
 	h.must(`sudo -n sh -c 'printf "blog.localhost {\n\trespond hi\n}\n" > ` + sites + `/blog.caddy'`)
