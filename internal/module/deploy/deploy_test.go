@@ -84,7 +84,7 @@ func TestModuleMeta(t *testing.T) {
 	if m.ID() != "deploy" || m.Title() != "deploy" {
 		t.Errorf("id/title = %q/%q", m.ID(), m.Title())
 	}
-	if want := []string{"container", "ci", "infra"}; !reflect.DeepEqual(m.Requires(), want) {
+	if want := []string{"container", "ci", "infra", "server"}; !reflect.DeepEqual(m.Requires(), want) {
 		t.Errorf("requires = %v", m.Requires())
 	}
 	if m.Detect(&detect.Project{}) != engine.StatusMissing {

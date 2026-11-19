@@ -45,7 +45,7 @@ func New() *Module { return &Module{} }
 
 func (*Module) ID() string         { return "deploy" }
 func (*Module) Title() string      { return "deploy" }
-func (*Module) Requires() []string { return []string{"container", "ci", "infra"} }
+func (*Module) Requires() []string { return []string{"container", "ci", "infra", "server"} }
 
 func (*Module) Detect(p *detect.Project) engine.Status {
 	if slices.Contains(p.Workflows, "deploy.yml") || slices.Contains(p.Workflows, "deploy.yaml") {

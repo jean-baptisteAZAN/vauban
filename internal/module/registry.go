@@ -7,9 +7,10 @@ import (
 	"github.com/jean-baptisteAZAN/vauban/internal/module/container"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/deploy"
 	"github.com/jean-baptisteAZAN/vauban/internal/module/infra"
+	"github.com/jean-baptisteAZAN/vauban/internal/module/server"
 )
 
 // All returns every registered module. Later tasks append theirs here.
 func All() []engine.Module {
-	return []engine.Module{container.New(), ci.New(), infra.New(), deploy.New()}
+	return []engine.Module{container.New(), ci.New(), infra.New(), server.New(), deploy.New()}
 }
