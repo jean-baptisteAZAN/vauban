@@ -348,3 +348,22 @@ func TestAuditScriptReadOnly(t *testing.T) {
 		}
 	}
 }
+
+// GitHub slugs are case-insensitive: a marker written as Acme/Shop is ours
+// for acme/shop and the other way round.
+func TestEvaluateOwnerCaseInsensitive(t *testing.T) {
+	f := fixture(t, "audit-user-caddy-ready.txt")
+	f.ProjectOwner = "Acme/Shop"
+	a := Evaluate(f, "acme/shop")
+	if len(a.Blockers()) != 0 || check(a, "Project dir").Status != "ok" {
+		t.Fatalf("%v %+v", a.Blockers(), check(a, "Project dir"))
+	}
+	f.ProjectOwner = "acme/shop"
+	if a := Evaluate(f, "ACME/Shop"); len(a.Blockers()) != 0 {
+		t.Fatalf("%v", a.Blockers())
+	}
+	f.ProjectOwner = "acme/other"
+	if a := Evaluate(f, "acme/shop"); len(a.Blockers()) == 0 {
+		t.Fatal("another repo must block")
+	}
+}

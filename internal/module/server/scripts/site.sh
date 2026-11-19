@@ -10,7 +10,7 @@
 # "VAUBAN_SITE_FOREIGN" on stdout). write records the new hash in
 # .vauban-site.pending before it renames the file into place, so a crash
 # before commit leaves a file that still counts as ours. write also needs the project owner marker
-# to equal the slug (exit 3) and refuses a symlink or directory (exit 4).
+# to equal the slug, ignoring case (exit 3) and refuses a symlink or directory (exit 4).
 # write backs the previous file up to .vauban-<project>.bak, rollback restores
 # it (or removes the new file). validate/reload run caddy inside its
 # container and never restart or recreate it.
@@ -83,9 +83,11 @@ need_home() {
 	site_hash="$home/apps/$project/.vauban-site"
 	pending="$home/apps/$project/.vauban-site.pending"
 }
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+# need_ours: the project's owner marker is this repo (case-insensitive).
 need_ours() {
 	cur=$(as_deploy head -n 1 "$marker" 2>/dev/null || true)
-	if [ "$cur" != "$slug" ]; then
+	if [ -z "$cur" ] || [ "$(lc "$cur")" != "$(lc "$slug")" ]; then
 		echo "VAUBAN_OWNER_CONFLICT ${cur:--}"
 		exit 3
 	fi

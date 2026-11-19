@@ -114,3 +114,25 @@ func TestStaleSteps(t *testing.T) {
 		t.Errorf("cloud: %v", got)
 	}
 }
+
+// The owner marker is written lowercased and compared case-insensitively by
+// every script that checks it (GitHub slugs are case-insensitive).
+func TestScriptsCompareSlugCaseInsensitively(t *testing.T) {
+	lower := `tr '[:upper:]' '[:lower:]'`
+	for name, s := range map[string]string{"project": projectScript, "site": siteScript, "destroy": destroyScript} {
+		if !strings.Contains(s, lower) {
+			t.Errorf("%s script never lowercases the slug", name)
+		}
+	}
+	for _, want := range []string{`slug=$(printf '%s' "$3" | ` + lower + `)`, `[ "$(lc "$cur")" = "$slug" ]`} {
+		if !strings.Contains(projectScript, want) {
+			t.Errorf("project script lacks %q", want)
+		}
+	}
+	if !strings.Contains(siteScript, `[ "$(lc "$cur")" != "$(lc "$slug")" ]`) {
+		t.Error("site script compares the owner case-sensitively")
+	}
+	if !strings.Contains(destroyScript, `[ "$(lc "$cur")" != "$(lc "$slug")" ]`) {
+		t.Error("destroy script compares the owner case-sensitively")
+	}
+}

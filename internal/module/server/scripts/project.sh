@@ -1,15 +1,16 @@
 # shellcheck shell=sh
 # shellcheck disable=SC2086
 # Creates ~deploy/apps/<project> (0750, owned by deploy) with a .vauban-owner
-# marker holding the repository slug. $1 = mode ("sudo" or "direct"),
-# $2 = project, $3 = repo slug. A directory owned by another slug, or without
+# marker holding the repository slug, lowercased (GitHub slugs are
+# case-insensitive; an existing marker is compared lowercased too).
+# $1 = mode ("sudo" or "direct"), $2 = project, $3 = repo slug. A directory owned by another slug, or without
 # a marker, or a symlink, is never touched: exit 3 with
 # "VAUBAN_OWNER_CONFLICT <other>" on stdout, exit 4 for a symlink.
 set -eu
 
 mode=$1
 project=$2
-slug=$3
+slug=$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')
 
 case "$project" in
 '' | */* | .*)
@@ -46,6 +47,7 @@ slug=$3
 apps="$home/apps"
 dir="$apps/$project"
 marker="$dir/.vauban-owner"
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 if [ -L "$apps" ] || [ -L "$dir" ] || [ -L "$marker" ]; then
 	echo "$dir or its marker is a symlink; refusing" >&2
@@ -54,7 +56,7 @@ fi
 if [ -d "$dir" ]; then
 	if [ -f "$marker" ]; then
 		cur=$(head -n 1 "$marker")
-		if [ "$cur" = "$slug" ]; then
+		if [ "$(lc "$cur")" = "$slug" ]; then
 			chmod 750 "$dir"
 			echo "project dir ready"
 			exit 0

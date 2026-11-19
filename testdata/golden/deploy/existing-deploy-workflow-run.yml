@@ -94,12 +94,12 @@ jobs:
           (umask 077 && printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts)
           ssh_opts=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes)
           # The project directory is created by vauban apply, not by CI, and
-          # must belong to this repository.
+          # must belong to this repository (slugs compare case-insensitively).
           ssh "${ssh_opts[@]}" -p "$DEPLOY_PORT" "deploy@$DEPLOY_HOST" "test -d ~/apps/$project" || {
             printf 'remote directory ~/apps/%s is missing: run vauban apply\n' "$project" >&2
             exit 1
           }
-          ssh "${ssh_opts[@]}" -p "$DEPLOY_PORT" "deploy@$DEPLOY_HOST" "grep -qxF -e \"$REPO\" ~/apps/$project/.vauban-owner" || {
+          ssh "${ssh_opts[@]}" -p "$DEPLOY_PORT" "deploy@$DEPLOY_HOST" "grep -qixF -e \"$REPO\" ~/apps/$project/.vauban-owner" || {
             printf '~/apps/%s belongs to another repository\n' "$project" >&2
             exit 1
           }

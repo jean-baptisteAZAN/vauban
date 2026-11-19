@@ -816,7 +816,7 @@ func TestExistingWorkflowChecksOwnership(t *testing.T) {
 	got := file(t, plan(t, goApp(t), existingCfg()), ".github/workflows/deploy.yml")
 	for _, want := range []string{
 		"REPO: ${{ github.repository }}",
-		`grep -qxF -e \"$REPO\" ~/apps/$project/.vauban-owner`,
+		`grep -qixF -e \"$REPO\" ~/apps/$project/.vauban-owner`,
 		"belongs to another repository",
 	} {
 		if !strings.Contains(got, want) {

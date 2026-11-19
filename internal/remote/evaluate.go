@@ -154,7 +154,7 @@ func Evaluate(f Facts, repo string) *Audit {
 		a.add("Project dir", "blocked", "apps/"+f.Project+" exists without a vauban owner marker")
 		a.block("apps/%s exists without a vauban owner marker", f.Project)
 	default:
-		if f.ProjectOwner == repo {
+		if strings.EqualFold(f.ProjectOwner, repo) { // GitHub slugs are case-insensitive
 			a.add("Project dir", "ok", "apps/"+f.Project+" owned by "+repo)
 			break
 		}
