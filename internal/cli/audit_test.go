@@ -14,12 +14,13 @@ import (
 
 type auditFake struct {
 	out   string
+	err   error
 	calls []engine.Cmd
 }
 
 func (f *auditFake) Run(_ context.Context, c engine.Cmd) ([]byte, error) {
 	f.calls = append(f.calls, c)
-	return []byte(f.out), nil
+	return []byte(f.out), f.err
 }
 
 const existingYAML = `project: shop
@@ -33,6 +34,11 @@ server:
 
 func auditRun(t *testing.T, yaml, fixture string) (string, *auditFake, error) {
 	t.Helper()
+	return auditRunErr(t, yaml, fixture, nil)
+}
+
+func auditRunErr(t *testing.T, yaml, fixture string, runErr error) (string, *auditFake, error) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("NO_COLOR", "1")
 	dir := t.TempDir()
@@ -43,7 +49,7 @@ func auditRun(t *testing.T, yaml, fixture string) (string, *auditFake, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fr := &auditFake{out: string(b)}
+	fr := &auditFake{out: string(b), err: runErr}
 	old := cmdRunner
 	cmdRunner = fr
 	t.Cleanup(func() { cmdRunner = old })
@@ -87,15 +93,52 @@ func TestAuditBlockers(t *testing.T) {
 	if exitCode(err) != 1 {
 		t.Fatalf("want exit 1, got %v", err)
 	}
-	if !strings.Contains(out, "cannot apply:") {
-		t.Errorf("no blockers heading:\n%s", out)
+	table, blockers, ok := strings.Cut(out, "cannot apply:")
+	if !ok {
+		t.Fatalf("no blockers heading:\n%s", out)
+	}
+	if !strings.Contains(table, "Ports 80/443") || !strings.Contains(table, "blocked") {
+		t.Errorf("table not printed before blockers:\n%s", out)
+	}
+	if !strings.Contains(blockers, "  - port 80 held by nginx") {
+		t.Errorf("missing blocker line:\n%s", blockers)
 	}
 }
 
 func TestAuditGuide(t *testing.T) {
-	out, _, _ := auditRun(t, existingYAML, "audit-user-caddy-baked.txt")
-	if !strings.Contains(out, "import /etc/caddy/sites/*.caddy") {
-		t.Errorf("guide not printed:\n%s", out)
+	out, _, err := auditRun(t, existingYAML, "audit-user-caddy-baked.txt")
+	if err != nil {
+		t.Fatalf("guide-only audit must not fail, got %v", err)
+	}
+	_, after, ok := strings.Cut(out, "caddy setup\n")
+	if !ok {
+		t.Fatalf("no caddy setup section:\n%s", out)
+	}
+	if !strings.Contains(after, "import /etc/caddy/sites/*.caddy") {
+		t.Errorf("guide not under caddy setup:\n%s", out)
+	}
+}
+
+func TestAuditSSHFailure(t *testing.T) {
+	out, fr, err := auditRunErr(t, existingYAML, "audit-nginx.txt", errors.New("ssh: connect to host: Connection refused"))
+	if err == nil || !strings.Contains(err.Error(), "Connection refused") {
+		t.Fatalf("want ssh error, got %v", err)
+	}
+	if len(fr.calls) != 1 {
+		t.Fatalf("calls: %d", len(fr.calls))
+	}
+	if strings.Contains(out, "Docker engine") || strings.Contains(out, "cannot apply:") {
+		t.Errorf("audit table printed on failure:\n%s", out)
+	}
+}
+
+func TestAuditHostKeyChanged(t *testing.T) {
+	out, _, err := auditRunErr(t, existingYAML, "audit-nginx.txt", errors.New("ssh: exit 255: WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"))
+	if err == nil || !strings.Contains(err.Error(), ".vauban/known_hosts") || !strings.Contains(err.Error(), "203.0.113.7") {
+		t.Fatalf("want host key message, got %v", err)
+	}
+	if strings.Contains(out, "Docker engine") {
+		t.Errorf("table printed:\n%s", out)
 	}
 }
 

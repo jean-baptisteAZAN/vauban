@@ -45,7 +45,11 @@ func auditStyle(status string) lipgloss.Style {
 	switch status {
 	case "ok":
 		return OK
-	case "missing", "warn":
+	case "missing":
+		// Unlike Mark, "missing" in an audit usually means "will be installed",
+		// so it is amber rather than red; "blocked" is the red one.
+		return Warn
+	case "warn":
 		return Warn
 	case "blocked":
 		return Err
