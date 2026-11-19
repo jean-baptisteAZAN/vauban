@@ -107,6 +107,9 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		if hw := hostWarning(c.Server.Host); hw != "" {
 			ui.Warning(w, hw)
 		}
+		if pw := portWarning(pl.st, c, force); pw != "" {
+			ui.Warning(w, pw)
+		}
 		lines, stop := writeAudit(ctx, w, root, p.GitHubRepo, c)
 		if stop {
 			ui.Warnings(w, "cannot apply:", lines)

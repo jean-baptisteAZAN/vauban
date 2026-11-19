@@ -440,3 +440,30 @@ func TestExistingDestroyUsesConfigUser(t *testing.T) {
 		}
 	}
 }
+
+// A new app_port rewrites the site at apply, but the generated workflow
+// keeps the old APP_PORT until it is regenerated with --force.
+func TestExistingPortChangeWarnsWithoutForce(t *testing.T) {
+	root, _ := appliedExisting(t)
+	const warn = "the deploy workflow still sets APP_PORT=8080"
+	out, err := execPlan(t, root, "--port", "9090")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, warn) || !strings.Contains(out, "--force") || !strings.Contains(out, "502") {
+		t.Errorf("no app_port warning:\n%s", out)
+	}
+	if out, _ := execPlan(t, root, "--port", "9090", "--force"); strings.Contains(out, warn) {
+		t.Errorf("warning with --force:\n%s", out)
+	}
+	if out, _ := execPlan(t, root, "--domain", "b.example.com", "--port", "8080"); strings.Contains(out, warn) {
+		t.Errorf("warning on a domain-only change:\n%s", out)
+	}
+	out, err = execVauban(t, context.Background(), "apply", "--dir", root, "--port", "9090", "--yes")
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, warn) {
+		t.Errorf("apply: no app_port warning:\n%s", out)
+	}
+}

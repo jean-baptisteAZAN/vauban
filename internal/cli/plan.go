@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/x/term"
@@ -107,6 +108,9 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	if c.Existing() && c.Server != nil {
 		if hw := hostWarning(c.Server.Host); hw != "" {
 			lines = append(lines, hw)
+		}
+		if pw := portWarning(pl.st, c, force); pw != "" {
+			lines = append(lines, pw)
 		}
 	}
 	if err != nil {
@@ -492,6 +496,21 @@ func writeDrift(w io.Writer, root string, st *engine.State, c *config.Config, st
 	if disk := infra.RenderedFingerprint(root); disk != "" && disk != want {
 		ui.Section(w, "infra", "infra/main.tf was rendered for "+disk+"; apply re-renders it for "+want)
 	}
+}
+
+// portWarning warns when app_port differs from the port the site was
+// written for and --force is not set: the generated workflow (skipped as an
+// existing file) still deploys with the old APP_PORT, so Caddy, rewritten
+// for the new port, returns 502. "" otherwise.
+func portWarning(st *engine.State, c *config.Config, force bool) string {
+	rec := st.Outputs["server_site"]
+	i := strings.LastIndex(rec, "|")
+	if !c.Existing() || force || i < 0 || rec[i+1:] == strconv.Itoa(c.AppPort) {
+		return ""
+	}
+	old := rec[i+1:]
+	return "app_port changed (" + old + " → " + strconv.Itoa(c.AppPort) + ") but the deploy workflow still sets APP_PORT=" + old +
+		": rerun with --force to regenerate the deploy files, then push; until then Caddy returns 502"
 }
 
 // writeSiteChange says why the Caddy site and deploy secrets run again.
